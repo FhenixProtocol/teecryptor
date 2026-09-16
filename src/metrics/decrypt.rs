@@ -29,8 +29,9 @@ use super::DURATION_BOUNDARIES;
 
 /// `outcome` for a response that carries a result.
 const OK: &str = "ok";
-/// `outcome` for a response no API funnel produced — axum rejected the request
-/// itself (malformed body, method not allowed), so there is no error code.
+/// `outcome` for a request axum refused: a malformed body, which the funnel
+/// labels with this same code (`ApiVersion::reject` in [`crate::http`]), or a
+/// method / route that never matched, which no funnel sees.
 const REJECTED: &str = "rejected";
 /// `host_chain_id` for a chain id outside the set this deployment serves. The
 /// value is caller-supplied, so it can never become a label verbatim.

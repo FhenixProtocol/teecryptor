@@ -9,14 +9,19 @@ use serde::Serialize;
 use thiserror::Error;
 
 /// JSON error body returned by the HTTP layer.
+///
+/// The body carries the stable error code and nothing else. Internal detail
+/// (a parse error, a configured value, an upstream message) stays in the
+/// server log. A client acts on the status and the code; a human message would
+/// only widen what the service reveals.
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     /// Stable, machine-readable error code (e.g. `"ct_not_found"`).
     pub error: &'static str,
-    /// Human-readable reason. Mirrors cofhe dispatcher's `error_message` field so
-    /// a dispatcher client reads the same key; falls back to the `error` code when
-    /// there's no extra detail. Safe to expose; never leaks internals.
-    pub error_message: String,
+    /// v1 only: old v1 clients surface `error_message`, so it repeats the code
+    /// there. v2 omits the key, like the dispatcher's v2 routes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<&'static str>,
 }
 
 /// Top-level error type for the Teecryptor service.
