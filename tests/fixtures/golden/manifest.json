@@ -1,0 +1,41 @@
+{
+  "tfhe_version": "1.5.1",
+  "entries": [
+    {
+      "file": "bool_true.bin",
+      "uint_type": 0,
+      "value_be_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "commit_hash_hex": "03ef137e7fcf9d79d5b6fd80661b99c57786ea4061e49f5cd7293112d3a7efd6"
+    },
+    {
+      "file": "u8_ab.bin",
+      "uint_type": 2,
+      "value_be_hex": "00000000000000000000000000000000000000000000000000000000000000ab",
+      "commit_hash_hex": "da82e4aeb46a0dd573726ba42bd38279162b7e9ab7c77a63d464e205d86a6f10"
+    },
+    {
+      "file": "u32_deadbeef.bin",
+      "uint_type": 4,
+      "value_be_hex": "00000000000000000000000000000000000000000000000000000000deadbeef",
+      "commit_hash_hex": "5a37cc46320ad5267eb9c3545960823e6402e092ea950ecbc4f45623bee61595"
+    },
+    {
+      "file": "u64_max.bin",
+      "uint_type": 5,
+      "value_be_hex": "000000000000000000000000000000000000000000000000ffffffffffffffff",
+      "commit_hash_hex": "8ba89629f05421a12fa7d36e964b4206335ef23a42ca042e228aa3d9884b7c8a"
+    },
+    {
+      "file": "u128_max.bin",
+      "uint_type": 6,
+      "value_be_hex": "00000000000000000000000000000000ffffffffffffffffffffffffffffffff",
+      "commit_hash_hex": "9baebebf21d68942441df0ff29ab346ad5660cb1a23bdcaa6c5550d213b9acaf"
+    },
+    {
+      "file": "u160_addr.bin",
+      "uint_type": 7,
+      "value_be_hex": "000000000000000000000000000000000000000000000000ffffffffffffffff",
+      "commit_hash_hex": "a978a31992c5f5f26e6d6fed84ed0de0c00d9ee504a9bc427c3013ca6dc4045b"
+    }
+  ]
+}

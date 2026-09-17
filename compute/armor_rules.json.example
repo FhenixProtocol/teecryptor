@@ -1,0 +1,14 @@
+[
+  {
+    "priority": 1000,
+    "description": "Block known bad actor",
+    "action": "deny(403)",
+    "src_ip_ranges": ["192.0.2.1/32"]
+  },
+  {
+    "priority": 2000,
+    "description": "Block another range",
+    "action": "deny(403)",
+    "src_ip_ranges": ["198.51.100.0/24", "203.0.113.0/24"]
+  }
+]

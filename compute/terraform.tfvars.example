@@ -1,0 +1,54 @@
+# Copy to compute/terraform.tfvars (gitignored) and fill in.
+# Applied AFTER the image exists (the digest is pinned on both sides).
+compute_project_id = "teecryptor-tdx"
+region             = "europe-west4"
+zone               = "europe-west4-b"
+
+# Image (two-phase: build first, then pin the digest here AND in the partner CELs):
+image_reference = "europe-west4-docker.pkg.dev/teecryptor-tdx/teecryptor/teecryptor"
+image_digest    = "sha256:REPLACE_WITH_DIGEST_FROM_CI_BUILD"
+
+# Baked-environment selector: staging | testnet | mainnet. The key SOURCE (partner
+# projects + per-partner WIF audiences + public bucket/object), the Shamir
+# threshold, and the permit/commitment gate policy are all compiled into the
+# binary per environment — NOT set here; the binary fails closed on any env
+# outside its baked map.
+env = "staging"
+
+# Runtime:
+ct_source_url = "http://CT_STUB_INTERNAL_IP:9450" # corpus-serving stub in this VPC (first-boot test)
+caller_cidr   = "35.235.240.0/20"                 # IAP range, so `gcloud compute start-iap-tunnel` can reach :8080
+# CI image push (defaults already point at FhenixProtocol/teecryptor main):
+# github_repository   = "FhenixProtocol/teecryptor"
+# github_workflow_ref = "FhenixProtocol/teecryptor/.github/workflows/build-teecryptor.yml@refs/heads/main"
+
+# Permit + commitment gate ENDPOINTS. The gate switches, commitment version,
+# registry address, and warn/enforce mode are baked per-env into the image — only
+# these API-keyed RPC endpoints are set here. Required for any env whose baked
+# policy enables the gate (else the VM refuses to boot — fail-closed).
+permit_chains_json          = "{\"<CHAIN_ID>\":{\"rpc_url\":\"REPLACE_WITH_HOSTCHAIN_RPC_URL\"}}" # PERMIT_CHAINS_JSON (rpc URL only; the TaskManager address is baked)
+commitment_registry_rpc_url = "REPLACE_WITH_REGISTRY_CHAIN_RPC_URL" # COMMITMENT_REGISTRY_RPC_URL — registry chain JSON-RPC endpoint
+
+# MIG sizing (Phase 1 runs a single instance):
+# mig_target_size = 1
+
+# Cloud Armor: path to a JSON rules file (see armor_rules.json.example).
+# Omit or leave empty to keep the default allow-all policy.
+# armor_rules_file = "armor_rules.json"
+
+# DDoS protection. The defaults enable Adaptive Protection and a per-IP rate
+# limit. Raise the thresholds for a busy endpoint, or set the rate limit to
+# false to remove the rule.
+# armor_adaptive_protection            = true
+# armor_rate_limit_enabled             = true
+# armor_rate_limit_threshold_count     = 90   # throttle above this per interval
+# armor_rate_limit_ban_threshold_count = 180  # ban above this per interval
+# armor_rate_limit_interval_sec        = 60
+# armor_rate_limit_ban_duration_sec    = 300
+
+# Empty => binary defaults apply (NOT stamped on the VM):
+# decrypt_concurrency     = "4"      # DECRYPT_CONCURRENCY (default: auto = #cores)
+# max_inflight            = "1000"   # MAX_INFLIGHT (default 1000)
+# commitment_timeout_ms   = "5000"   # COMMITMENT_TIMEOUT_MS (default 5000)
+# commitment_cache_size   = "100000" # COMMITMENT_CACHE_SIZE (default 100000)
+# commitment_cache_ttl_secs = "3600" # COMMITMENT_CACHE_TTL_SECS (default 3600)

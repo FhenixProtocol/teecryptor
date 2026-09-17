@@ -1,0 +1,130 @@
+name: build-teecryptor-mock
+
+# Publishes the `mock` build to ghcr so downstream stacks (cofhe's
+# docker-compose) can pull a ready-made image instead of needing a teecryptor
+# checkout and the private cofhe-keys credentials to build one.
+#
+# THIS IMAGE IS NOT DEPLOYABLE. `FEATURES=mock` compiles out attestation and the
+# Shamir key reconstruction: it reads its keys from a plain directory
+# (MOCK_KEYS_DIR) and, absent that, mints throwaway keys. It exists so a local
+# stack can exercise the real decrypt/seal wire paths. Production images come
+# from build-teecryptor.yml, which pushes to the shared Artifact Registry and is
+# what a Confidential Space VM pins by digest. The registry, the workflow and the
+# tag are all separate so the two can never be confused.
+#
+# Auth is GITHUB_TOKEN + packages:write — no repo secrets (cofhe-keys is a
+# public dep, fetched over https).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "abi/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "Dockerfile"
+      - ".github/workflows/build-teecryptor-mock.yml"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Hardcoded lowercase on purpose: ghcr rejects any uppercase in a repository
+  # name, and `github.repository` preserves the org's casing
+  # ("FhenixProtocol/teecryptor"), which fails the push with
+  # "repository name must be lowercase".
+  IMAGE: ghcr.io/fhenixprotocol/teecryptor-mock
+
+jobs:
+  # One leg per architecture on its NATIVE runner — QEMU-emulating a tfhe build
+  # takes hours. amd64 is what cofhe's CI runs; arm64 is what devs run on Apple
+  # Silicon, and both need to work from the same tag.
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Platform pair
+        env:
+          platform: ${{ matrix.platform }}
+        run: echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build + push (${{ matrix.platform }}, by digest)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          build-args: FEATURES=mock
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # Scope apart from the production workflow's cache: same platform, but a
+          # different feature set, so sharing a scope would thrash both.
+          cache-from: type=gha,scope=mock-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=mock-${{ matrix.platform }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          echo "${{ steps.build.outputs.digest }}" > "${{ runner.temp }}/digests/${PLATFORM_PAIR}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: mock-digests-${{ env.PLATFORM_PAIR }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stitch the per-arch digests into one multi-arch manifest and tag it.
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: mock-digests-*-${{ github.run_id }}
+          merge-multiple: true
+
+      # The sha tag is always published — that is what downstream stacks pin.
+      # `latest` is only moved by main, so a workflow_dispatch preview built from
+      # a feature branch can be consumed by sha without `latest` ever pointing at
+      # unmerged code.
+      - name: Create manifest + tag
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -eu
+          TAGS="-t ${IMAGE}:${GITHUB_SHA}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS="$TAGS -t ${IMAGE}:latest"
+          else
+            echo "::notice::preview build from ${GITHUB_REF} — publishing ${IMAGE}:${GITHUB_SHA} only, leaving :latest alone"
+          fi
+          # shellcheck disable=SC2086
+          docker buildx imagetools create $TAGS \
+            $(for f in *; do printf '%s@%s ' "$IMAGE" "$(cat "$f")"; done)
+          docker buildx imagetools inspect "${IMAGE}:${GITHUB_SHA}"
+        env:
+          IMAGE: ${{ env.IMAGE }}

@@ -1,0 +1,32 @@
+# Baked security policy — "testnet" environment.
+#
+# These values were previously operator-set env vars (REQUIRE_PERMIT,
+# REQUIRE_COMMITMENT, COMMITMENT_WARN_ONLY, COMMITMENT_VERSION,
+# COMMITMENT_REGISTRY_ADDRESS, SHAMIR_THRESHOLD). They are compiled into the
+# image via include_str!, so an operator cannot weaken the permit/commitment
+# gates at launch — changing policy needs a rebuild + partner re-pin.
+#
+# Do NOT put secrets here: the image is publicly pullable. The RPC endpoints
+# (COMMITMENT_REGISTRY_RPC_URL, PERMIT_CHAINS_JSON) carry API keys and stay
+# env-supplied.
+require_permit                 = true
+enable_commitment_verification = true
+
+# Present because the commitment gate is on. The registry is the one cofhe's
+# blockchain-poster writes to for testnet-v2: a single contract on Arbitrum
+# Sepolia (chain 421614) serving all three host chains, keyed by
+# (version, handle) — the poster's `commitment-poster` relayer posts there.
+#
+# The version below is v2 in canonical form (0x + 64 hex digits), matching what
+# the engine commits under and the key the registry stores. Version 1 is
+# still Active on that registry and holds the bulk of the history, so handles
+# committed before the v2 cutover resolve only under v1 and will MISS under v2.
+# That is why this starts in warn-only:
+#
+# warning_instead_of_enforcement = run the gate and log every failure with
+# mode=warn_only, but ALLOW the decrypt. Flip to false (rebuild + re-pin) once
+# the warn logs are clean, i.e. once v1-only handles have aged out.
+[commitment]
+version                        = "0x0000000000000000000000000000000000000000000000000000000000000002"
+registry_address               = "0x4ed29DD2bda5055ADaB10ff63f5556F6774e7D9F"
+warning_instead_of_enforcement = true

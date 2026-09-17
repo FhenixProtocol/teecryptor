@@ -1,0 +1,5 @@
+# Copy to keys/terraform.tfvars (gitignored) and fill in.
+# Applied FIRST (before compute). The image_digest comes from the CI build.
+keys_project_id    = "teecryptor-sa-1"
+compute_project_id = "teecryptor-tdx"
+image_digest       = "sha256:REPLACE_WITH_DIGEST_FROM_CI_BUILD"

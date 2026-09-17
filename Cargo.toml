@@ -1,0 +1,111 @@
+[package]
+name = "teecryptor"
+version = "0.1.0"
+edition = "2021"
+license-file = "LICENSE"
+description = "TDX-attested TFHE decryption service (Phase 1 MVP). UNAUDITED."
+repository = "https://github.com/FhenixProtocol/teecryptor"
+readme = "README.md"
+publish = false
+
+# Dependencies are added per module as the implementation lands, to keep the
+# build fast and free of unused crates. (axum, reqwest, etc. arrive with their
+# modules.)
+#
+# All versions are exact (`=X.Y.Z`, mirroring Cargo.lock) so neither a stray
+# `cargo update` nor a lockfile-less build can move a dependency without a
+# deliberate manifest edit. To upgrade: bump the pin here, then
+# `cargo update -p <crate>`.
+[dependencies]
+tfhe = { version = "=1.5.1", features = ["boolean", "shortint", "integer"] }
+zeroize = "=1.8.2"
+thiserror = "=1.0.69"
+primitive-types = "=0.13.1"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+# Parses the per-environment security policy baked into the image via
+# include_str! (src/envs/<env>.toml). Compiled in, so the policy bytes are part
+# of the attested image digest — not runtime-mutable. See src/env_policy.rs.
+toml = "=1.1.4"
+reqwest = { version = "=0.12.28", features = ["json", "rustls-tls", "blocking"], default-features = false }
+tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "sync"] }
+hex = "=0.4.3"
+# Used by direct_decrypt's mirror decoding: tfhe's safe_deserialize handles the
+# versionized wire format, then the value is re-encoded with plain bincode and
+# read into local mirror structs (we control both sides of that round-trip).
+bincode = "=1.3.3"
+sha2 = "=0.10.9"
+axum = "=0.8.9"
+# CORS preflight handling so browser dApps (CofheSDK) can call the v2 routes
+# cross-origin. Already in the tree transitively via axum; we surface it here
+# only to enable the `cors` feature.
+tower-http = { version = "=0.6.11", features = ["cors"] }
+uuid = { version = "=1.23.2", features = ["v4"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
+anyhow = "=1.0.103"
+base64 = "=0.22.1"
+rustls = { version = "=0.23.45", features = ["ring"] }
+# Ethereum stack — used by the permit module to verify EIP-712 issuer signatures
+# locally and to call TaskManager.isAllowedWithPermission via JSON-RPC. Matches
+# cofhe's dispatcher version so the same Permission struct shape is on the wire.
+alloy = { version = "=1.8.3", features = ["json", "json-rpc", "providers", "contract", "transport-http", "rpc-types-eth", "sol-types", "signer-local"] }
+# NaCl crypto_box (X25519 + XSalsa20-Poly1305) for sealing decrypt output back
+# to the caller's pubkey. Pinned to cofhe dispatcher's version so the sealed
+# bytes are byte-identical across services — same caller-side decrypt code
+# works against both. We don't enable the `nightly` SIMD feature (cofhe does)
+# because Teecryptor builds on stable; the wire output is unaffected.
+dryoc = "=0.6.2"
+tiny-keccak = { version = "=2.0.2", features = ["keccak"] }
+lru = "=0.16.4"
+chrono = { version = "=0.4.44", features = ["clock"] }
+k256 = { version = "=0.13.4", features = ["ecdsa"] }
+# Request metrics: OTel API/SDK instruments the per-response counters +
+# latency histograms; the prometheus bridge exposes them for pull on the
+# dedicated /metrics port (see src/metrics/). SDK is trimmed to the metrics
+# pipeline only (no trace/logs), and `prometheus` drops its default protobuf
+# feature — the /metrics handler only needs Registry + the text encoder.
+opentelemetry = "=0.32.0"
+opentelemetry_sdk = { version = "=0.32.1", default-features = false, features = ["metrics", "internal-logs"] }
+opentelemetry-prometheus = "=0.32.0"
+prometheus = { version = "=0.14.0", default-features = false }
+# OTLP push to the Telemetry API. http-proto only, and the exporter always
+# receives our own client, so no reqwest feature of the crate is pulled.
+opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["http-proto", "internal-logs"] }
+opentelemetry-http = { version = "=0.32.0", default-features = false }
+# Message types only (no tonic): the transport splits an export into chunks of
+# at most 200 points — the Telemetry API's hard per-request cap.
+opentelemetry-proto = { version = "=0.32.0", default-features = false, features = ["gen-tonic-messages", "metrics"] }
+prost = "=0.14.1"
+async-trait = "=0.1.89"
+http = "=1.4.1"
+# Shared key-distribution core (FhenixProtocol/cofhe-tdx-keygen). We embed the
+# READER half only — gather every partner's Shamir share, filter liars by
+# per-share digest, reconstruct T-of-N, and validate against the published full
+# digest. We own identity (per-partner attested WIF federation); this crate owns
+# the baked env source, wire format, and reconstruction. `default-features = false`
+# drops the in-enclave `writer` path;
+# pinned by rev so the format the reader decodes cannot drift from the producer.
+cofhe-keys = { git = "https://github.com/FhenixProtocol/cofhe-tdx-keygen.git", rev = "84028ad390242fd26c965074b2a482f856c09dad", version = "0.1.0", default-features = false, features = ["reader"] }
+
+[features]
+# Local-dev only: skip the attestation/STS/SA/Secret-Manager chain and boot
+# with a throwaway generated ClientKey. NEVER enable in production.
+mock = []
+# Legacy plain (already-expanded) decrypt path. Unreachable at runtime — the
+# HTTP gate rejects non-compressed ciphertexts — and retained only pending
+# removal. Compiling it out by default prevents silent reactivation if the gate
+# ever loosens. Cleanup tracked in issue #50.
+legacy-plain-decrypt = []
+
+[dev-dependencies]
+wiremock = "=0.6.5"
+tempfile = "=3.27.0"
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+all = "warn"

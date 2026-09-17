@@ -1,0 +1,197 @@
+-- Per-endpoint BigQuery queries against `fhenix-dev.teecryptor_lb_logs.requests`
+-- (see dashboard.tf for the sink that populates it, and for the geo distribution
+-- example query this file's country breakdown builds on).
+--
+-- Each query scopes to a fixed set of endpoints via the `scoped` CTE, since the
+-- raw logs are full of scanner/bot noise (/.env, /actuator, /swagger*, etc.)
+-- that otherwise clutters the endpoint dimension. Fill in your real routes
+-- before running — patterns are SQL LIKE patterns, so `%` matches any
+-- sequence and `_` matches a single character (e.g. '/v2/%' matches every
+-- path under /v2/):
+--
+--   WHERE EXISTS (
+--     SELECT 1 FROM UNNEST([
+--       '/replace-with-your-endpoint%'
+--       -- , '/another-endpoint'
+--     ]) AS pattern
+--     WHERE endpoint LIKE pattern
+--   )
+--
+-- All queries default to the last 24h (DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY));
+-- widen the interval as needed.
+
+-- 1. Total requests per endpoint
+WITH base AS (
+  SELECT
+    REGEXP_EXTRACT(httpRequest.requestUrl, r'^https?://[^/]+([^?]*)') AS endpoint
+  FROM `fhenix-dev.teecryptor_lb_logs.requests`
+  WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+),
+scoped AS (
+  SELECT * FROM base
+  WHERE EXISTS (
+    SELECT 1 FROM UNNEST([
+      '/replace-with-your-endpoint%'
+      -- , '/another-endpoint'
+    ]) AS pattern
+    WHERE endpoint LIKE pattern
+  )
+)
+SELECT endpoint, COUNT(*) AS total_requests
+FROM scoped
+GROUP BY endpoint
+ORDER BY total_requests DESC;
+
+
+-- 2. HTTP status codes per endpoint (also answers "total requests by status")
+WITH base AS (
+  SELECT
+    REGEXP_EXTRACT(httpRequest.requestUrl, r'^https?://[^/]+([^?]*)') AS endpoint,
+    httpRequest.status AS status
+  FROM `fhenix-dev.teecryptor_lb_logs.requests`
+  WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+),
+scoped AS (
+  SELECT * FROM base
+  WHERE EXISTS (
+    SELECT 1 FROM UNNEST([
+      '/replace-with-your-endpoint%'
+      -- , '/another-endpoint'
+    ]) AS pattern
+    WHERE endpoint LIKE pattern
+  )
+)
+SELECT endpoint, status, COUNT(*) AS requests
+FROM scoped
+GROUP BY endpoint, status
+ORDER BY endpoint, requests DESC;
+
+
+-- 3. Latency per endpoint (avg / p50 / p95 / p99 / max)
+WITH base AS (
+  SELECT
+    REGEXP_EXTRACT(httpRequest.requestUrl, r'^https?://[^/]+([^?]*)') AS endpoint,
+    httpRequest.latency AS latency_s
+  FROM `fhenix-dev.teecryptor_lb_logs.requests`
+  WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+),
+scoped AS (
+  SELECT * FROM base
+  WHERE EXISTS (
+    SELECT 1 FROM UNNEST([
+      '/replace-with-your-endpoint%'
+      -- , '/another-endpoint'
+    ]) AS pattern
+    WHERE endpoint LIKE pattern
+  )
+)
+SELECT
+  endpoint,
+  COUNT(*) AS requests,
+  ROUND(AVG(latency_s), 4) AS avg_latency_s,
+  ROUND(APPROX_QUANTILES(latency_s, 100)[OFFSET(50)], 4) AS p50_latency_s,
+  ROUND(APPROX_QUANTILES(latency_s, 100)[OFFSET(95)], 4) AS p95_latency_s,
+  ROUND(APPROX_QUANTILES(latency_s, 100)[OFFSET(99)], 4) AS p99_latency_s,
+  ROUND(MAX(latency_s), 4) AS max_latency_s
+FROM scoped
+GROUP BY endpoint
+ORDER BY requests DESC;
+
+
+-- 4. Top 10 client IPs per endpoint
+WITH base AS (
+  SELECT
+    REGEXP_EXTRACT(httpRequest.requestUrl, r'^https?://[^/]+([^?]*)') AS endpoint,
+    httpRequest.remoteIp AS ip
+  FROM `fhenix-dev.teecryptor_lb_logs.requests`
+  WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+),
+scoped AS (
+  SELECT * FROM base
+  WHERE EXISTS (
+    SELECT 1 FROM UNNEST([
+      '/replace-with-your-endpoint%'
+      -- , '/another-endpoint'
+    ]) AS pattern
+    WHERE endpoint LIKE pattern
+  )
+),
+ranked AS (
+  SELECT endpoint, ip, COUNT(*) AS requests,
+    ROW_NUMBER() OVER (PARTITION BY endpoint ORDER BY COUNT(*) DESC) AS rn
+  FROM scoped
+  GROUP BY endpoint, ip
+)
+SELECT endpoint, ip, requests FROM ranked WHERE rn <= 10
+ORDER BY endpoint, requests DESC;
+
+
+-- 5. Top 10 client countries per endpoint
+-- (requires teecryptor_geoip.ip_country_ranges to be loaded — see dashboard.tf)
+WITH base AS (
+  SELECT
+    REGEXP_EXTRACT(httpRequest.requestUrl, r'^https?://[^/]+([^?]*)') AS endpoint,
+    httpRequest.remoteIp AS ip
+  FROM `fhenix-dev.teecryptor_lb_logs.requests`
+  WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+),
+scoped AS (
+  SELECT * FROM base
+  WHERE EXISTS (
+    SELECT 1 FROM UNNEST([
+      '/replace-with-your-endpoint%'
+      -- , '/another-endpoint'
+    ]) AS pattern
+    WHERE endpoint LIKE pattern
+  )
+),
+enriched AS (
+  SELECT s.endpoint, geo.country_name AS country
+  FROM scoped s
+  JOIN `fhenix-dev.teecryptor_geoip.ip_country_ranges` geo
+    ON NET.IPV4_TO_INT64(NET.SAFE_IP_FROM_STRING(s.ip))
+       BETWEEN NET.IPV4_TO_INT64(NET.SAFE_IP_FROM_STRING(geo.start_ip))
+           AND NET.IPV4_TO_INT64(NET.SAFE_IP_FROM_STRING(geo.end_ip))
+),
+ranked AS (
+  SELECT endpoint, country, COUNT(*) AS requests,
+    ROW_NUMBER() OVER (PARTITION BY endpoint ORDER BY COUNT(*) DESC) AS rn
+  FROM enriched
+  GROUP BY endpoint, country
+)
+SELECT endpoint, country, requests FROM ranked WHERE rn <= 10
+ORDER BY endpoint, requests DESC;
+
+
+-- 6. Response-family (2XX/3XX/4XX/5XX) columns, one row per endpoint (for a
+-- Looker Studio table chart). Looker Studio's custom-SQL connector only
+-- accepts a single SELECT statement, so this uses fixed COUNTIF columns
+-- rather than a true dynamic PIVOT (which needs a DECLARE/EXECUTE IMMEDIATE
+-- script and can't be used as a Looker Studio data source).
+WITH base AS (
+  SELECT
+    REGEXP_EXTRACT(httpRequest.requestUrl, r'^https?://[^/]+([^?]*)') AS endpoint,
+    httpRequest.status AS status
+  FROM `fhenix-dev.teecryptor_lb_logs.requests`
+  WHERE DATE(timestamp) >= DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)
+),
+scoped AS (
+  SELECT * FROM base
+  WHERE EXISTS (
+    SELECT 1 FROM UNNEST([
+      '/replace-with-your-endpoint%'
+      -- , '/another-endpoint'
+    ]) AS pattern
+    WHERE endpoint LIKE pattern
+  )
+)
+SELECT
+  endpoint,
+  COUNTIF(status BETWEEN 200 AND 299) AS `2xx`,
+  COUNTIF(status BETWEEN 300 AND 399) AS `3xx`,
+  COUNTIF(status BETWEEN 400 AND 499) AS `4xx`,
+  COUNTIF(status BETWEEN 500 AND 599) AS `5xx`,
+  COUNT(*) AS total_requests
+FROM scoped
+GROUP BY endpoint
+ORDER BY endpoint;

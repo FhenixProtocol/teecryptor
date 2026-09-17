@@ -1,0 +1,5 @@
+# Fetch git dependencies (cofhe-keys, from the public FhenixProtocol/cofhe-tdx-keygen
+# repo) via the system `git` CLI rather than cargo's built-in client, so fetches use the
+# same git/TLS stack as the rest of the toolchain. The dependency is public — no auth.
+[net]
+git-fetch-with-cli = true

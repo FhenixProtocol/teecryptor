@@ -1,0 +1,225 @@
+name: build-teecryptor
+
+# Builds a NATIVE multi-arch image (no QEMU) and pushes it to the shared
+# Artifact Registry (project fhenix-artifacts-registry). amd64 is what the Confidential Space
+# TDX VM runs; arm64 lets devs pull/run locally on Apple Silicon. Built ONCE — every
+# environment's VM pulls the same digest from the artifact registry and pins it in its
+# own keys-side CEL.
+#
+# Two publish paths, selected by the `testing` dispatch input:
+# - Production (push to main, or a dispatch with testing=false): WIF auth via the
+#   NON-SECRET repo variables WIF_PROVIDER, PUBLISHER_SA and IMAGE_REGISTRY. The WIF
+#   provider pins the ref, so only main can publish here. Tags :latest.
+# - Testing (a dispatch with testing=true, the default): the GCP_AR_TESTING_SA key
+#   secret and the TESTING_IMAGE_REGISTRY variable. Any branch can build. Pushes to
+#   the isolated teecryptor-testing repository and never tags :latest.
+#
+# BUILDING IS NOT DEPLOYING: a VM only runs the digest pinned in its keys-side CEL,
+# which stays a manual two-phase terraform step (see Makefile `deploy`, set
+# KEYS_PROJECT + COMPUTE_PROJECT).
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Image tag (e.g. v0.1.0). Defaults to <branch>-<sha> when omitted."
+        required: false
+        default: ""
+      testing:
+        description: "Push to the isolated testing registry with the testing SA key (no WIF, no :latest). Set false for a production build from main."
+        required: false
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "abi/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "Dockerfile"
+      - ".github/workflows/build-teecryptor.yml"
+
+permissions:
+  contents: read
+  id-token: write # GCP WIF (OIDC token exchange); unused on the testing path
+
+env:
+  # Push events carry no inputs, so `inputs.testing` is empty there and both values
+  # resolve to the production path.
+  TESTING: ${{ inputs.testing == true }}
+  IMAGE_REGISTRY: ${{ inputs.testing == true && vars.TESTING_IMAGE_REGISTRY || vars.IMAGE_REGISTRY }}
+
+jobs:
+  # Gate: the image is only built if the suite passes.
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # --release for the same reason as ci.yml: unoptimised tfhe makes this suite
+      # ~11x slower, and the cache above pays the optimised compile once.
+      - name: Test
+        run: cargo test --release --all-targets
+
+  # One leg per architecture on its NATIVE runner. Each pushes by digest (untagged)
+  # into the selected registry; merge stitches them into one multi-arch manifest.
+  build:
+    needs: test
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Platform pair
+        env:
+          platform: ${{ matrix.platform }}
+        run: echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
+      - name: Auth to GCP (WIF, production registry)
+        if: inputs.testing != true
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PUBLISHER_SA }}
+          # Match the provider's allowed_audiences (GCP no-scheme URI form).
+          audience: //iam.googleapis.com/${{ vars.WIF_PROVIDER }}
+      - name: Auth to GCP (SA key, testing registry)
+        if: inputs.testing == true
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_AR_TESTING_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker "${IMAGE_REGISTRY%%/*}" --quiet
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build + push (${{ matrix.platform }}, by digest)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE_REGISTRY }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          echo "${{ steps.build.outputs.digest }}" > "${{ runner.temp }}/digests/${PLATFORM_PAIR}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Stitch the per-arch digests into one multi-arch manifest in the selected registry,
+  # tag it, and surface the amd64 PLATFORM digest (what the TDX VM runs).
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      # Needed so the Trivy step below can read .trivyignore from the working tree —
+      # this job otherwise only stitches the manifest and scans a remote image by ref.
+      - uses: actions/checkout@v4
+      - name: Auth to GCP (WIF, production registry)
+        if: inputs.testing != true
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.PUBLISHER_SA }}
+          audience: //iam.googleapis.com/${{ vars.WIF_PROVIDER }}
+      - name: Auth to GCP (SA key, testing registry)
+        if: inputs.testing == true
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_AR_TESTING_SA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker "${IMAGE_REGISTRY%%/*}" --quiet
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*-${{ github.run_id }}
+          merge-multiple: true
+
+      - name: Create + push multi-arch manifest
+        id: manifest
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          cd "${{ runner.temp }}/digests"
+          # workflow_dispatch may supply a tag; otherwise it's <branch>-<short sha>,
+          # which is main-<short sha> on a push to main.
+          DEFAULT_TAG="${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}"
+          TAG="${RELEASE_TAG:-${DEFAULT_TAG}}"
+          refs=()
+          for f in *; do refs+=("${IMAGE_REGISTRY}@$(cat "$f")"); done
+          tags=(-t "${IMAGE_REGISTRY}:${TAG}")
+          # :latest tracks the production repository only. A testing build never moves it.
+          if [[ "${TESTING}" != "true" ]]; then
+            tags+=(-t "${IMAGE_REGISTRY}:latest")
+          fi
+          docker buildx imagetools create "${tags[@]}" "${refs[@]}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          # The TDX VM runs amd64, so each env's keys-side CEL must pin the AMD64
+          # PLATFORM digest — NOT the manifest-list digest (the VM would never match
+          # it and refuse to boot).
+          echo "amd64_digest=$(cat linux-amd64)" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy scan (amd64 — the image the TDX VM runs)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE_REGISTRY }}@${{ steps.manifest.outputs.amd64_digest }}
+          severity: HIGH,CRITICAL
+          exit-code: "1"
+          # Explicit, auditable exceptions live in .trivyignore (each entry justified
+          # + carries a revisit trigger). The gate stays strict for everything else.
+          trivyignores: .trivyignore
+
+      # --- SLSA provenance: DISABLED for now ----------------------------------
+      # The keys-side CEL pins the image DIGEST only, so no signature is required.
+      # SLSA provenance (actions/attest-build-provenance, keyless to the PUBLIC
+      # Rekor log) can be added later as a fleet-wide layer when the repo goes
+      # public (needs the attestations: write permission) — one provenance covers
+      # the one image every env runs.
+
+      - name: Print digest for the two-phase deploy
+        env:
+          TAG: ${{ steps.manifest.outputs.tag }}
+          AMD64_DIGEST: ${{ steps.manifest.outputs.amd64_digest }}
+        run: |
+          {
+            if [[ "${TESTING}" == "true" ]]; then
+              echo "TESTING build pushed to the isolated testing repository: ${IMAGE_REGISTRY}:${TAG}  (no :latest)"
+              echo
+              echo "A pin on this image is temporary: re-pin to the production repository after the branch merges."
+              echo "The VM runtime SA needs roles/artifactregistry.reader on the testing repository to pull it."
+            else
+              echo "Image pushed to the shared artifact registry: ${IMAGE_REGISTRY}:${TAG}  (+ :latest)"
+            fi
+            echo
+            echo "PIN THIS (amd64 platform digest) per env in the gitops var-file AND in each"
+            echo "partner's attested_readers (keygen repo):"
+            echo "    ${IMAGE_REGISTRY}@${AMD64_DIGEST}"
+            echo
+            echo "Then per env, from a gitops checkout — apply, then roll:"
+            echo "    terraform -chdir=compute apply -var-file=<gitops>/terraform/<env>/teecryptor/<env>.tfvars"
+            echo "    gcloud compute instance-groups managed rolling-action replace teecryptor-mig \\"
+            echo "      --zone=<zone> --project=<env-compute-project> --max-surge=1 --max-unavailable=0"
+            echo
+            echo "The apply alone deploys nothing: update_policy is OPPORTUNISTIC, so it only re-points"
+            echo "the template. The replace is what recreates the VM, which is what re-attests it."
+          } >> "$GITHUB_STEP_SUMMARY"

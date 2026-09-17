@@ -1,0 +1,8 @@
+[toolchain]
+# Pinned to a specific stable for reproducible builds + deterministic CI.
+# Floating `stable` made `cargo fmt --check` / clippy a moving target — a
+# toolchain bump could spontaneously fail CI on untouched code (it did: a
+# rustfmt 1.8 -> 1.9 change reformatted single-line fns). Bump this
+# deliberately when adopting a newer stable.
+channel = "1.96.0"
+components = ["rustfmt", "clippy"]

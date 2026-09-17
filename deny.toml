@@ -1,0 +1,65 @@
+# cargo-deny v2 config. CI runs `cargo deny check` (advisories + licenses + bans
+# + sources). Generous allow-list — tighten as we learn what the dep tree
+# actually pulls. If a new dep brings an unrecognized license, add it here.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "warn"
+# Only fail on unmaintained warnings for crates WE depend on directly. Transitive
+# unmaintained (e.g. bincode 1.x via wiremock) is out of our control and would
+# block CI without giving us anywhere to fix it.
+unmaintained = "workspace"
+ignore = [
+    # bincode 1.3.3: unmaintained-by-choice (the team declared 1.3.3 complete; no
+    # CVE). We depend on it directly for the direct_decrypt mirror re-encode, but
+    # tfhe 1.5.1 already pulls bincode 1.3.3 transitively — so this adds no new
+    # supply-chain surface, it only reclassifies an unavoidable dep as "direct".
+    # Revisit if tfhe ever drops bincode.
+    "RUSTSEC-2025-0141",
+    # lru 0.16.4 unsound LruCache::pop(): forced transitively by alloy-provider
+    # (alloy is byte-pinned to cofhe, unfixable our side). Revisit on an alloy bump.
+    "RUSTSEC-2026-0253",
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+# Our own crate carries a custom, non-SPDX license (Fhenix Non-Commercial) and is
+# publish = false. Skip workspace-own / unpublished crates so cargo-deny does not
+# fail resolving it. Third-party dependency licenses below are still enforced.
+private = { ignore = true }
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSD-3-Clause-Clear",       # tfhe-rs
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",   # webpki-roots — Mozilla root cert store data
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+# cofhe-keys is consumed as a git dependency from the FhenixProtocol org until it
+# is published to a registry (Artifact Registry Cargo, then crates.io once public —
+# see the producer repo's plan). Scope the allowance to the org so cargo-deny still
+# rejects any other git source.
+[sources.allow-org]
+github = ["FhenixProtocol"]

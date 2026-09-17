@@ -1,0 +1,12 @@
+/target
+/.git
+/.github
+/.claude
+*.tf
+*.tfstate*
+*.tfvars
+docs
+monitoring
+RELEASE.md
+SECURITY-OVERVIEW.md
+docker-compose.yml

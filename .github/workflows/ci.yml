@@ -1,0 +1,135 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml pins the toolchain (channel + rustfmt + clippy).
+      - run: rustup show
+      # Cache cargo registry/git + target/. Critical because the codegen steps below
+      # build --release: optimised tfhe is heavy to compile, and we want to pay that
+      # once rather than per CI run. (An earlier note here credited a
+      # [profile.dev.package."*"] override; no such profile exists in this tree.)
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      # Gates run on the DEFAULT (non-mock) features — the real attestation +
+      # cofhe-keys reconstruction path that actually ships. `mock` is a dev-only
+      # escape hatch that COMPILES OUT the real path (`#[cfg(not(feature = "mock"))]`),
+      # so it must never be the feature set we validate; `--all-features` would do
+      # exactly that and leave the real path untested. `mock` pulls in no extra
+      # dependencies, so the mock build below reuses the same dep tree (only the
+      # crate itself recompiles) — cheap insurance that the escape hatch still
+      # compiles. We `check` (not `build`): the mock path only needs to type-check,
+      # and a full `--all-targets` link here (after Build/Test/Doc already filled
+      # target/) exhausts the runner disk and SIGBUSes ld.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      # --release is load-bearing, not stylistic. The suite decrypts real
+      # ciphertexts and generates TFHE key material, and unoptimised tfhe is ~11x
+      # slower: measured 33.8s vs 3.1s for the same 164+25 tests, which is why this
+      # step used to run for 10 minutes. Release costs ~36s more to compile
+      # (126s vs 90s cold) and the cache above pays that once. Keeping Build on the
+      # same profile means tfhe is only ever compiled once, not once per profile.
+      - name: Build
+        run: cargo build --release --locked --all-targets
+      - name: Test
+        run: cargo test --release --locked --all-targets
+      - name: Doc
+        run: cargo doc --locked --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Mock check (dev escape hatch still compiles)
+        run: cargo check --locked --all-targets --features mock
+      # The gates above deliberately run on the default features, so the
+      # mock-only tests never execute there. Run just those: they guard the
+      # invariant that a partial MOCK_KEYS_DIR fails at boot instead of falling
+      # back to throwaway keys, and that the registry address resolves from the
+      # deployments file rather than a stale literal — both would otherwise
+      # regress green. The filters are per-module, so a new mock-only test
+      # module needs a line here or it silently never runs.
+      - name: Mock-only tests
+        run: |
+          cargo test --release --locked --features mock --bin teecryptor mock_keys_dir
+          cargo test --release --locked --features mock --bin teecryptor env_policy::mock_tests
+          cargo test --release --locked --features mock --lib from_key_file
+
+  supply-chain:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # Run cargo-deny NATIVELY on the runner — NOT via EmbarkStudios/cargo-deny-action,
+      # which runs in an isolated Docker container that can't see .cargo/config.toml
+      # (git-fetch-with-cli). Installing + running natively matches the check job.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # cargo-deny covers RUSTSEC advisories AND licenses AND bans AND sources,
+      # honoring our `deny.toml` policy (notably `unmaintained = "workspace"` —
+      # transitive unmaintained crates from alloy/tfhe are out of our control).
+      # (We dropped rustsec/audit-check@v2 earlier: its strict defaults ignore our
+      # deny.toml policy and fail on advisories we explicitly tolerate.)
+      - name: cargo-deny (licenses, bans, advisories, sources)
+        run: cargo deny --locked check
+
+  # Build-only (no push) validation of the container image on PRs. Catches
+  # Dockerfile / release-build breakage at PR time instead of on the post-merge
+  # build-teecryptor publish. Single-arch (amd64) is enough to catch that; the
+  # multi-arch build + Artifact Registry publish stays main-only in
+  # build-teecryptor.yml — nothing is pushed from here.
+  docker-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build image (amd64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          cache-from: type=gha,scope=pr-amd64
+          cache-to: type=gha,mode=max,scope=pr-amd64
+
+  # Full-history secret scan. History is clean at publication; this gate keeps
+  # every commit clean after the repo is public.
+  secret-scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write   # only used by the public-gated SARIF upload below
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run gitleaks
+        run: |
+          curl -sSfL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          ./gitleaks git --no-banner --redact --report-format sarif --report-path results.sarif --exit-code 1 .
+      # Surface findings in the Security tab and as PR annotations. This is free
+      # code scanning on public repos; private repos need paid GHAS for it, so
+      # it stays gated off until the repo is public. The scan above blocks the
+      # merge on a leak either way — always() runs the upload even when it did.
+      - name: Upload gitleaks SARIF
+        if: always() && github.event.repository.visibility == 'public'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif

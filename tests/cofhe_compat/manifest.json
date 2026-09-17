@@ -1,0 +1,65 @@
+[
+  {
+    "file": "bool_true.ct",
+    "name": "bool_true",
+    "encryption_type": 0,
+    "compact": false,
+    "gzipped": false,
+    "security_zone": 0,
+    "expected_plaintext_hex": "0x0000000000000000000000000000000000000000000000000000000000000001"
+  },
+  {
+    "file": "bool_false.ct",
+    "name": "bool_false",
+    "encryption_type": 0,
+    "compact": false,
+    "gzipped": false,
+    "security_zone": 0,
+    "expected_plaintext_hex": "0x0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  {
+    "file": "u8_171.ct",
+    "name": "u8_171",
+    "encryption_type": 2,
+    "compact": false,
+    "gzipped": false,
+    "security_zone": 0,
+    "expected_plaintext_hex": "0x00000000000000000000000000000000000000000000000000000000000000ab"
+  },
+  {
+    "file": "u16_48879.ct",
+    "name": "u16_48879",
+    "encryption_type": 3,
+    "compact": false,
+    "gzipped": false,
+    "security_zone": 0,
+    "expected_plaintext_hex": "0x000000000000000000000000000000000000000000000000000000000000beef"
+  },
+  {
+    "file": "u32_deadbeef.ct",
+    "name": "u32_deadbeef",
+    "encryption_type": 4,
+    "compact": false,
+    "gzipped": false,
+    "security_zone": 0,
+    "expected_plaintext_hex": "0x00000000000000000000000000000000000000000000000000000000deadbeef"
+  },
+  {
+    "file": "u64_max.ct",
+    "name": "u64_max",
+    "encryption_type": 5,
+    "compact": false,
+    "gzipped": false,
+    "security_zone": 0,
+    "expected_plaintext_hex": "0x000000000000000000000000000000000000000000000000ffffffffffffffff"
+  },
+  {
+    "file": "u128_demo.ct",
+    "name": "u128_demo",
+    "encryption_type": 6,
+    "compact": false,
+    "gzipped": false,
+    "security_zone": 0,
+    "expected_plaintext_hex": "0x00000000000000000000000000000000000000000000000000000000075bcd15"
+  }
+]

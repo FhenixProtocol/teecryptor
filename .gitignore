@@ -1,0 +1,42 @@
+# Rust build output
+/target
+
+# Secrets — NEVER commit
+*.key
+*.pem
+*.p12
+*-sa.json
+*-service-account*.json
+cosign.key
+.env
+.env.*
+!.env.example
+
+# Terraform state and value-bearing vars
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+tfplan
+*.tfplan
+
+# Internal operator notes — runbooks that name internal projects or depend on
+# private repos. They stay out of the public tree.
+/local/
+
+# Local Claude / editor / OS cruft
+# Claude Code — ignore per-machine state only. Shared config and any repo-specific
+# skills, agents, commands and hooks are committed.
+/.claude/settings.local.json
+/.claude/tmp/
+/.claude/worktrees/
+/.claude/.sound
+/.claude/scheduled_tasks.lock
+.DS_Store
+*.swp
+*~
+
+# Python (ct-stub) caches
+__pycache__/
+*.pyc

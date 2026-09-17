@@ -1,0 +1,154 @@
+FHENIX NON-COMMERCIAL SOFTWARE LICENSE
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, MODIFICATION, AND DISTRIBUTION
+
+1. Definitions
+
+"License" means the terms and conditions set forth in Sections 1 through 13 of this License.
+
+"Licensor" means FHE Labs Ltd. ("Fhenix"), as the copyright owner or entity authorized by the copyright owner to grant the rights set forth in this License.
+
+"You" (or "Your") means an individual or Legal Entity exercising permissions granted by this License.
+
+"Program" means the software, source code, documentation, configuration files, applications, and other materials contained in the repository to which this License applies and identified as being subject to this License, excluding Third-Party Components.
+
+"Source" form means the preferred form for making modifications, including source code, documentation source, configuration files, and related materials.
+
+"Object" form means any form resulting from mechanical transformation or translation of Source form, including compiled object code, generated documentation, and other machine-readable or executable forms.
+
+"Derivative Work" means a work that is based upon or derived from the Program, whether in Source or Object form, including modifications, adaptations, translations, or other material changes to the Program.
+
+"Resulting Program" means the Program, together with any modifications, adaptations, additions, or other Derivative Works created by You under this License.
+
+"Third-Party Component" means any software, code, library, module, documentation, data, or other material incorporated into or distributed with the Program that is not owned by Fhenix and is subject to a separate third-party license.
+
+"Non-Commercial Use" means use of the Program solely for purposes that are not primarily intended for or directed toward commercial advantage or monetary compensation, including:
+
+  - personal use, personal study, academic research, security research, auditing, testing, experimentation, educational activities, private entertainment, hobby projects, and amateur projects;
+  - use by a charitable organization, educational institution, public research organization, public safety or public health organization, environmental protection organization, or government institution, provided that such use is not primarily intended to generate commercial revenue; and
+  - any other use expressly authorized by Fhenix in writing.
+
+For the avoidance of doubt, use of the Program in connection with a commercial product, service, protocol, platform, infrastructure, deployment, or business activity is Commercial Use, even if the particular use does not itself generate revenue.
+
+Use by an individual or organization for internal business purposes, production deployment, revenue-generating activities, provision of paid services, or development of a commercial product or service constitutes Commercial Use.
+
+Fhenix may, in its sole discretion, grant written permission for uses that would otherwise constitute Commercial Use.
+
+2. Ownership and Reservation of Rights
+
+You acknowledge and agree that Fhenix and its licensors retain all right, title, and interest in and to the Program, including all copyrights, patents, trade secrets, trademarks, and other intellectual property rights therein.
+
+Except for the limited rights expressly granted under Section 3, no rights or licenses are granted to You, whether expressly, by implication, estoppel, or otherwise.
+
+This License does not transfer ownership of the Program or any intellectual property rights in the Program to You.
+
+You will not reverse engineer, decompile, disassemble or otherwise attempt to discover the source code of any Software in this repository except to the extent you may be expressly permitted to reverse engineer or decompile under applicable law.
+
+The Program may contain or be distributed with Third-Party Components that are subject to licenses other than this License. Third-Party Components are not relicensed by Fhenix under this License. The rights and obligations applicable to each Third-Party Component are governed by the applicable third-party license.
+
+3. Grant of Non-Commercial License
+
+Subject to Your continued compliance with this License, Fhenix grants You a limited, worldwide, non-exclusive, royalty-free license to:
+
+  - access, read, inspect, and study the Program;
+  - reproduce the Program;
+  - modify, adapt, translate, and create Derivative Works of the Program;
+  - compile, execute, test, and experiment with the Program;
+  - use the Program and Resulting Programs solely for Non-Commercial Use; and
+  - distribute, publish, and make available copies of the Program or Resulting Programs solely for Non-Commercial Use,
+
+provided that You:
+
+  - retain all copyright, license, attribution, and other proprietary notices included in the Program;
+  - include a copy of this License with any distribution of the Program or Resulting Program;
+  - clearly identify material modifications made by You, where applicable;
+  - include the Notice described in Section 4 with any distribution of the Program or Resulting Program; and
+  - do not use any Fhenix or third-party trademarks, trade names, service marks, logos, or other branding in a manner that suggests sponsorship, endorsement, affiliation, or authorization that does not actually exist.
+
+The rights granted under this Section are limited to Non-Commercial Use. No right to Commercial Use is granted under this License.
+
+4. Attribution and Notice Requirements
+
+For each copy or distribution of the Program or a Resulting Program, You must retain or include a prominent notice substantially in the following form:
+
+This software incorporates or is based in part on software developed by FHE Labs Ltd. ("Fhenix"). The Fhenix-developed portions of this software are licensed under the Fhenix Non-Commercial Software License. Commercial use of such portions is not permitted without prior written authorization from Fhenix.
+
+If You modify the Program, You must clearly indicate that You have modified the Program and, where reasonably practicable, identify the modified portions.
+
+You may not remove, obscure, or alter copyright, license, attribution, or other proprietary notices contained in the Program.
+
+5. Redistribution and Derivative Works
+
+You may distribute the Program and Resulting Programs, whether in Source or Object form, solely for Non-Commercial Use, provided that:
+
+  - the distribution complies with this License;
+  - recipients are provided with a copy of this License;
+  - the applicable copyright, attribution, and license notices are preserved;
+  - the distribution does not represent or imply that Fhenix endorses, sponsors, or is affiliated with the distributor or the distributed software; and
+  - any Derivative Work containing or incorporating Fhenix-owned portions of the Program remains subject to the Non-Commercial Use restriction and notice requirements of this License.
+
+You may not impose additional restrictions on recipients that prevent them from exercising the rights granted by this License for Non-Commercial Use.
+
+Nothing in this Section requires independently developed software that merely interoperates with, communicates with, or uses an unmodified interface to the Program to be licensed under this License.
+
+6. Third-Party Components
+
+The Program may contain or be distributed with Third-Party Components that are subject to licenses other than this License.
+
+Third-Party Components are not relicensed by Fhenix under this License. The rights and obligations applicable to each Third-Party Component are governed by the applicable third-party license.
+
+Where applicable, the repository will identify such Third-Party Components and provide the applicable license texts or notices in the relevant source files, documentation, NOTICE file, or other accompanying materials.
+
+You must comply with all applicable third-party license terms when using or redistributing such Third-Party Components.
+
+Where a Third-Party Component is subject to a license that grants broader rights than this License, this License does not purport to restrict those rights with respect to that Third-Party Component itself.
+
+If there is a conflict between this License and an applicable third-party license with respect to a Third-Party Component, the applicable third-party license will govern that Third-Party Component.
+
+7. Trademarks and Branding
+
+This License does not grant any right to use the names, trademarks, service marks, logos, or other branding of Fhenix.
+
+You may make truthful factual references to the Program with applicable attribution requirements or accurately describe the origin of the software, provided that such references do not imply endorsement, sponsorship, or affiliation.
+
+8. Disclaimer of Warranty
+
+THE PROGRAM IS PROVIDED "AS IS," WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING, WITHOUT LIMITATION, WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT, ACCURACY, OR THAT THE PROGRAM WILL OPERATE WITHOUT INTERRUPTION OR ERROR.
+
+YOU ASSUME ALL RISK ARISING FROM YOUR USE, REPRODUCTION, MODIFICATION, DISTRIBUTION, OR OTHER EXPLOITATION OF THE PROGRAM AND ANY RESULTING PROGRAM.
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, FHENIX AND ITS LICENSORS SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM OR IN CONNECTION WITH THE PROGRAM OR YOUR USE OF THE PROGRAM.
+
+9. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL FHENIX, ITS AFFILIATES, LICENSORS, CONTRIBUTORS, OR THEIR RESPECTIVE DIRECTORS, OFFICERS, EMPLOYEES, OR AGENTS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, CONSEQUENTIAL, OR PUNITIVE DAMAGES, OR ANY LOSS OF PROFITS, REVENUE, DATA, BUSINESS OPPORTUNITY, OR GOODWILL, ARISING OUT OF OR IN CONNECTION WITH THIS LICENSE, THE PROGRAM, OR YOUR USE OR INABILITY TO USE THE PROGRAM, WHETHER BASED ON CONTRACT, TORT, NEGLIGENCE, STRICT LIABILITY, OR ANY OTHER LEGAL THEORY, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+10. Additional Liability and Support
+
+You may, at Your own option, offer support, warranty, indemnity, or other liability obligations in connection with Your distribution of the Program or a Resulting Program.
+
+However, You may act only on Your own behalf and on Your sole responsibility. You may not make any representation, warranty, commitment, or assumption of liability on behalf of Fhenix or any other contributor.
+
+If You undertake any such obligations, You agree to indemnify, defend, and hold harmless Fhenix and the other contributors from and against any liability, claim, loss, or expense arising from Your assumption of such obligations.
+
+11. Termination
+
+Your rights under this License automatically terminate if You fail to comply with any of its terms.
+
+Upon termination, You must cease all use, reproduction, modification, and distribution of the Program and any Resulting Program, except to the extent continued use is independently permitted by an applicable third-party license.
+
+Termination does not affect rights and obligations that accrued before termination.
+
+12. No Patent License
+
+Except for the limited rights expressly granted under this License, no patent license is granted by Fhenix, whether expressly, by implication, estoppel, or otherwise.
+
+13. Miscellaneous
+
+This License constitutes the entire agreement concerning the rights granted with respect to the Program and supersedes any inconsistent license terms accompanying the Program, except with respect to Third-Party Components, which remain governed by their applicable licenses.
+
+If any provision of this License is held to be unenforceable, the remaining provisions will remain in full force and effect.
+
+Nothing in this License grants You any right to use Fhenix's or any third party's intellectual property except as expressly provided herein.
+
+END OF TERMS AND CONDITIONS

@@ -1,0 +1,12 @@
+# Trivy vulnerability exceptions. Each entry MUST carry a justification and a
+# revisit trigger. Keep this list minimal — it is a hole in the HIGH/CRITICAL gate.
+
+# CVE-2026-14456 — OpenSSL (libssl3) denial of service via unbounded memory.
+# Source: the distroless/cc-debian12 base image ships libssl3; Debian had no fixed
+# version as of 2026-08-20 (unfixable at build time).
+# Not reachable here: teecryptor is rustls-only (reqwest with rustls-tls,
+# default-features=false) and the dep tree has no openssl-sys/native-tls, so the
+# binary never links or calls libssl3 — it is dead base-image code.
+# Revisit: drop this line once deb12 publishes a fixed libssl3 (the real fix is to
+# move to an OpenSSL-free base — tracked separately).
+CVE-2026-14456

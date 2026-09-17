@@ -1,0 +1,28 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/check-plugins.py\""
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {
+    "fhenix-standards@fhenix": true,
+    "fhenix-workflow@fhenix": true,
+    "fhenix-ops@fhenix": true
+  },
+  "extraKnownMarketplaces": {
+    "fhenix": {
+      "source": {
+        "source": "github",
+        "repo": "FhenixProtocol/claude-marketplace"
+      },
+      "autoUpdate": true
+    }
+  }
+}

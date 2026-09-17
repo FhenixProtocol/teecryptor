@@ -1,0 +1,17 @@
+# Baked security policy — "mainnet" environment (six key-share holders, threshold 3).
+#
+# The permit gate is ON. The commitment gate is baked ON and ENFORCING (v1,
+# warning_instead_of_enforcement = false), but the CommitmentRegistry contract for
+# mainnet is not deployed yet — registry_address is a "TBD" placeholder. This is
+# deliberately NOT bootable until the real address is filled in AND the (API-keyed)
+# COMMITMENT_REGISTRY_RPC_URL is supplied: with the gate on, boot fail-closes when the
+# RPC is unset, and "TBD" fails address parsing loudly when the RPC is set — so the
+# placeholder can never be deployed by accident. See src/envs/staging.toml for why RPC
+# endpoints stay env-supplied and are never baked into the (publicly-pullable) image.
+require_permit                 = true
+enable_commitment_verification = true
+
+[commitment]
+version                        = "0x0000000000000000000000000000000000000000000000000000000000000002"
+registry_address               = "TBD"
+warning_instead_of_enforcement = false

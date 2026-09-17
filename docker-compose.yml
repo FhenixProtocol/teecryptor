@@ -1,0 +1,28 @@
+# Local smoke test of the MOCK container (boots + serves /healthz) with no GCP.
+#
+# This builds the image with FEATURES=mock, which skips the attestation/GCP
+# chain and uses a throwaway generated ClientKey. It is NOT an end-to-end
+# decrypt rig: the throwaway key can't decrypt real cofhe ciphertexts, so
+# /decrypt against an arbitrary /GetCT will not return a meaningful plaintext.
+# Full end-to-end decrypt is proven by `cargo test`.
+services:
+  teecryptor-mock:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        FEATURES: mock
+    environment:
+      CT_SOURCE_URL: "http://localhost:9450" # unused by /healthz
+      BIND_ADDR: "0.0.0.0:8080"
+      RUST_LOG: "info"
+      # ACL + commitment enforcement default ON (fail-closed). This smoke test
+      # has no chain RPC, so disable both gates — otherwise boot bails on the
+      # missing PERMIT_CHAINS_JSON / COMMITMENT_REGISTRY_* and /healthz never
+      # comes up.
+      REQUIRE_PERMIT: "false"
+      ENABLE_COMMITMENT_VERIFICATION: "false"
+    ports:
+      - "8080:8080"
+    # No container healthcheck: the distroless image has no shell/curl. Check
+    # from the host: `curl -s localhost:8080/healthz` (expect 200 once booted).

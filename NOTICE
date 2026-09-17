@@ -1,0 +1,19 @@
+Fhenix Non-Commercial Software License — NOTICE
+
+This software incorporates or is based in part on software developed by
+FHE Labs Ltd. ("Fhenix"). The Fhenix-developed portions of this software are
+licensed under the Fhenix Non-Commercial Software License (see LICENSE).
+Commercial use of such portions is not permitted without prior written
+authorization from Fhenix.
+
+Third-Party Components
+----------------------
+
+This software depends on third-party components that are licensed separately
+and are not relicensed under the Fhenix Non-Commercial Software License. Each is
+governed by its own license. Notably:
+
+  - tfhe-rs (Zama) — BSD-3-Clause-Clear. This license grants no patent rights.
+
+The remaining third-party dependencies are declared in the project's Cargo
+manifests and lockfiles; each is governed by its own license.
