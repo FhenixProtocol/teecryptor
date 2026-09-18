@@ -17,6 +17,12 @@ name: build-teecryptor
 # BUILDING IS NOT DEPLOYING: a VM only runs the digest pinned in its keys-side CEL,
 # which stays a manual two-phase terraform step (see Makefile `deploy`, set
 # KEYS_PROJECT + COMPUTE_PROJECT).
+#
+# A production build signs the amd64 digest with keyless Cosign and attests SLSA
+# build provenance. Both use this workflow's OIDC token. Both go to the public
+# Rekor log. No signing key exists. A partner checks the signature at PIN time,
+# before it approves a digest. The runtime gate does not change: the CEL still
+# pins the digest only.
 on:
   workflow_dispatch:
     inputs:
@@ -42,7 +48,8 @@ on:
 
 permissions:
   contents: read
-  id-token: write # GCP WIF (OIDC token exchange); unused on the testing path
+  id-token: write # GCP WIF (OIDC token exchange), and Fulcio for keyless Cosign
+  attestations: write # SLSA build provenance
 
 env:
   # Push events carry no inputs, so `inputs.testing` is empty there and both values
@@ -189,17 +196,57 @@ jobs:
           # + carries a revisit trigger). The gate stays strict for everything else.
           trivyignores: .trivyignore
 
-      # --- SLSA provenance: DISABLED for now ----------------------------------
-      # The keys-side CEL pins the image DIGEST only, so no signature is required.
-      # SLSA provenance (actions/attest-build-provenance, keyless to the PUBLIC
-      # Rekor log) can be added later as a fleet-wide layer when the repo goes
-      # public (needs the attestations: write permission) — one provenance covers
-      # the one image every env runs.
+      # These two actions are pinned by SHA, unlike the rest of this file. A
+      # moved tag on either one forges provenance for every image we ship.
+      - name: Install Cosign
+        if: inputs.testing != true
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      # Cosign gets a certificate from Fulcio with this job's OIDC token. The
+      # certificate names the repo, the workflow, the ref and the commit. The
+      # partner asserts those four fields at pin time.
+      #
+      # It signs the AMD64 PLATFORM digest. That is the digest each partner pins
+      # and the digest the TDX VM runs. A signature on the manifest-list digest
+      # would never match a pin.
+      #
+      # Cosign stores the signature next to the image, under the tag
+      # sha256-<digest>.sig. This registry grants allUsers the reader role, so a
+      # partner reads that signature with no credential. That public read is
+      # DELIBERATE and the partner check depends on it. Do not remove it.
+      #
+      # A testing build never signs. Its registry is not public, and it can run
+      # from any branch, so the certificate would carry a ref that no partner
+      # accepts.
+      - name: Sign the amd64 image with keyless Cosign
+        if: inputs.testing != true
+        env:
+          AMD64_DIGEST: ${{ steps.manifest.outputs.amd64_digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE_REGISTRY}@${AMD64_DIGEST}"
+
+      # The same identity attests the same digest in the standard SLSA format.
+      # The partner verify command reads the Cosign signature above. This
+      # attestation serves any other consumer.
+      - name: Attest SLSA build provenance
+        if: inputs.testing != true
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-name: ${{ env.IMAGE_REGISTRY }}
+          subject-digest: ${{ steps.manifest.outputs.amd64_digest }}
+          push-to-registry: true
 
       - name: Print digest for the two-phase deploy
         env:
           TAG: ${{ steps.manifest.outputs.tag }}
           AMD64_DIGEST: ${{ steps.manifest.outputs.amd64_digest }}
+          COMMIT: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          # workflow_ref is "<owner>/<repo>/<path>@<ref>". Add the server URL and
+          # it equals the Fulcio certificate identity.
+          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
         run: |
           {
             if [[ "${TESTING}" == "true" ]]; then
@@ -222,4 +269,31 @@ jobs:
             echo
             echo "The apply alone deploys nothing: update_policy is OPPORTUNISTIC, so it only re-points"
             echo "the template. The replace is what recreates the VM, which is what re-attests it."
+            if [[ "${TESTING}" != "true" ]]; then
+              echo
+              echo "## Hand these two values to each partner"
+              echo
+              echo '```hcl'
+              echo "image_digest = \"${AMD64_DIGEST}\""
+              echo "source_sha   = \"${COMMIT}\""
+              echo '```'
+              echo
+              echo "That is the whole handoff. The partner tooling holds the rest"
+              echo "as fixed constants."
+              echo
+              echo "## Verify this image against the public Rekor log"
+              echo
+              echo "The partner runs this on their own machine. It proves that this"
+              echo "workflow built this digest from this commit. A non-zero exit means:"
+              echo "do not pin."
+              echo
+              echo '```'
+              echo "cosign verify ${IMAGE_REGISTRY}@${AMD64_DIGEST} \\"
+              echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+              echo "  --certificate-identity ${IDENTITY} \\"
+              echo "  --certificate-github-workflow-repository ${REPO} \\"
+              echo "  --certificate-github-workflow-ref ${REF} \\"
+              echo "  --certificate-github-workflow-sha ${COMMIT}"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
