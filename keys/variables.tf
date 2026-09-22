@@ -13,9 +13,8 @@ variable "image_digest" {
   description = "Pinned container image digest (sha256:...). Produced by the compute side (CI build) and handed here. Pinned in BOTH the WIP CEL and the principalSet impersonation binding (defense in depth)."
 }
 
-# NOTE: Cosign image_signatures CEL pinning is deferred (see SECURITY-OVERVIEW.md
-# and the original variables.tf note). The digest pin (CEL + principalSet) is the
-# primary control for Phase 1. When wiring signature pinning, add a
-# `cosign_pubkey_fingerprint` var here + an `attribute.image_signatures` mapping
-# + a `contains(",ECDSA_P256_SHA256:<fp>,")` clause in the CEL below, and set
-# `tee-signed-image-repos` + the cosign recovery annotations on the compute side.
+# NOTE: signature-based CEL pinning is NOT planned. Confidential Space's
+# `attribute.image_signatures` matches a cosign public-KEY fingerprint. Our build
+# is keyless, so it has no key and produces no such fingerprint. The digest pin
+# below stays the runtime control; where an image came from is proven at pin time
+# by the partner. See SECURITY-OVERVIEW.md.

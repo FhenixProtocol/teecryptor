@@ -9,6 +9,12 @@ federation). Clients reach it over an HTTP decrypt and seal API.
 The FHE secret key and the signer key only ever materialize inside the attested
 image.
 
+Each production build on `main` emits a keyless SLSA build provenance attestation,
+served by GitHub on an API that needs no account. Before a partner pins a new
+digest it proves, against that public record, that our workflow built the digest
+from the commit we published beside it. The runtime gate is unchanged: each
+partner's CEL still pins the digest only.
+
 ## Documentation
 
 | File | Job |
