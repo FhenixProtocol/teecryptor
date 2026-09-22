@@ -48,18 +48,21 @@ share.
 
 The CEL proves *which* image runs. It cannot prove *where that image came from*,
 because the attestation token carries no repository, workflow or commit claim. A
-partner therefore checks the origin **before** it pins. The build signs the amd64
-digest with keyless Cosign, and the certificate binds that digest to this
-repository, this workflow, the ref and the commit. The partner runs `cosign
-verify` on its own machine, against the public Rekor log, and asserts the exact
-digest and the exact commit. A non-zero exit means it does not pin. Verification
-needs no Fhenix credential and no GitHub account, so the partner trusts the
-public log rather than us.
+partner therefore checks the origin **before** it pins. The build emits a keyless
+SLSA build provenance attestation for the amd64 digest, and the certificate binds
+that digest to this repository, this workflow, the ref and the commit. The partner
+runs `gh attestation verify` on its own machine and asserts the exact digest, the
+exact commit, `refs/heads/main` and this workflow file. A non-zero exit means it
+does not pin.
 
-Cosign stores the signature next to the image. The Artifact Registry repository
-grants `allUsers` the reader role, which is what lets a partner read it. **That
-public read is deliberate and the check depends on it.** Removing it breaks
-partner verification.
+The attestation is public: GitHub serves the bundle over an API that needs no
+account, and it is also in the public Rekor log. Verification needs no Fhenix
+credential and no GitHub login, so the partner trusts the public record rather
+than us.
+
+Resolving the image manifest does use the Artifact Registry repository's
+`allUsers` reader grant. **That public read is deliberate and the check depends on
+it.**
 
 An earlier model held the whole key in a single Fhenix-owned custodian project;
 the `keys/` Terraform module is what remains of it, and the reader reads none of

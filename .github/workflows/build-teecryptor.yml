@@ -18,11 +18,11 @@ name: build-teecryptor
 # which stays a manual two-phase terraform step (see Makefile `deploy`, set
 # KEYS_PROJECT + COMPUTE_PROJECT).
 #
-# A production build signs the amd64 digest with keyless Cosign and attests SLSA
-# build provenance. Both use this workflow's OIDC token. Both go to the public
-# Rekor log. No signing key exists. A partner checks the signature at PIN time,
-# before it approves a digest. The runtime gate does not change: the CEL still
-# pins the digest only.
+# A production build attests SLSA build provenance for the amd64 digest, using
+# this workflow's OIDC token and Fulcio. No signing key exists. The attestation
+# goes to the public Rekor log, and GitHub serves it on a public API that needs
+# no account. A partner checks provenance at PIN time, before it approves a
+# digest. The runtime gate does not change: the CEL still pins the digest only.
 on:
   workflow_dispatch:
     inputs:
@@ -48,8 +48,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # GCP WIF (OIDC token exchange), and Fulcio for keyless Cosign
-  attestations: write # SLSA build provenance
+  id-token: write # GCP WIF (OIDC token exchange); unused on the testing path
 
 env:
   # Push events carry no inputs, so `inputs.testing` is empty there and both values
@@ -133,6 +132,12 @@ jobs:
   merge:
     needs: build
     runs-on: ubuntu-24.04
+    # Only this job attests, so only this job gets the permission. At workflow
+    # level it would also land on `test`, which runs third-party build scripts.
+    permissions:
+      contents: read
+      id-token: write # GCP WIF, and Fulcio for the attestation
+      attestations: write # SLSA build provenance
     steps:
       # Needed so the Trivy step below can read .trivyignore from the working tree —
       # this job otherwise only stitches the manifest and scans a remote image by ref.
@@ -196,57 +201,47 @@ jobs:
           # + carries a revisit trigger). The gate stays strict for everything else.
           trivyignores: .trivyignore
 
-      # These two actions are pinned by SHA, unlike the rest of this file. A
-      # moved tag on either one forges provenance for every image we ship.
-      - name: Install Cosign
-        if: inputs.testing != true
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
-
-      # Cosign gets a certificate from Fulcio with this job's OIDC token. The
-      # certificate names the repo, the workflow, the ref and the commit. The
-      # partner asserts those four fields at pin time.
+      # The certificate Fulcio issues names this repo, this workflow, the ref and
+      # the commit. Those are the four fields the partner asserts at pin time.
       #
-      # It signs the AMD64 PLATFORM digest. That is the digest each partner pins
-      # and the digest the TDX VM runs. A signature on the manifest-list digest
+      # It attests the AMD64 PLATFORM digest. That is the digest each partner pins
+      # and the digest the TDX VM runs. An attestation on the manifest-list digest
       # would never match a pin.
       #
-      # Cosign stores the signature next to the image, under the tag
-      # sha256-<digest>.sig. This registry grants allUsers the reader role, so a
-      # partner reads that signature with no credential. That public read is
-      # DELIBERATE and the partner check depends on it. Do not remove it.
+      # A testing build never attests. It can run from any branch, so the
+      # certificate would carry a ref that no partner accepts.
       #
-      # A testing build never signs. Its registry is not public, and it can run
-      # from any branch, so the certificate would carry a ref that no partner
-      # accepts.
-      - name: Sign the amd64 image with keyless Cosign
-        if: inputs.testing != true
-        env:
-          AMD64_DIGEST: ${{ steps.manifest.outputs.amd64_digest }}
-        run: |
-          set -euo pipefail
-          cosign sign --yes "${IMAGE_REGISTRY}@${AMD64_DIGEST}"
-
-      # The same identity attests the same digest in the standard SLSA format.
-      # The partner verify command reads the Cosign signature above. This
-      # attestation serves any other consumer.
+      # push-to-registry stays FALSE. GitHub serves the bundle on a public API
+      # that needs no account, which is where the partner reads it. It also must
+      # stay false here: this job authenticates with `gcloud auth configure-docker`,
+      # which writes only a credHelpers entry, and actions/attest reads registry
+      # credentials solely from the `auths` object. A registry push would throw
+      # "No credentials found for registry".
+      #
+      # This action is pinned by SHA. Note that other actions in this job are not,
+      # including aquasecurity/trivy-action@master, which runs just above with the
+      # same token. This pin narrows one hole; it does not close the row.
       - name: Attest SLSA build provenance
-        if: inputs.testing != true
+        if: inputs.testing != true && github.ref == 'refs/heads/main'
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
         with:
           subject-name: ${{ env.IMAGE_REGISTRY }}
           subject-digest: ${{ steps.manifest.outputs.amd64_digest }}
-          push-to-registry: true
+          push-to-registry: false
 
+      # always(), so a failure above never costs the operator the digest.
       - name: Print digest for the two-phase deploy
+        if: always() && steps.manifest.outputs.amd64_digest != ''
         env:
           TAG: ${{ steps.manifest.outputs.tag }}
           AMD64_DIGEST: ${{ steps.manifest.outputs.amd64_digest }}
           COMMIT: ${{ github.sha }}
-          REPO: ${{ github.repository }}
-          REF: ${{ github.ref }}
-          # workflow_ref is "<owner>/<repo>/<path>@<ref>". Add the server URL and
-          # it equals the Fulcio certificate identity.
-          IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
+          # CONSTANTS, written out in full and deliberately NOT derived from this
+          # run. A command that asserts whatever the run already was proves
+          # nothing. These are the values the partner tooling bakes in.
+          REPO: FhenixProtocol/teecryptor
+          SIGNER_WORKFLOW: FhenixProtocol/teecryptor/.github/workflows/build-teecryptor.yml
+          REF: refs/heads/main
         run: |
           {
             if [[ "${TESTING}" == "true" ]]; then
@@ -281,19 +276,21 @@ jobs:
               echo "That is the whole handoff. The partner tooling holds the rest"
               echo "as fixed constants."
               echo
-              echo "## Verify this image against the public Rekor log"
+              echo "## Verify this image"
               echo
-              echo "The partner runs this on their own machine. It proves that this"
-              echo "workflow built this digest from this commit. A non-zero exit means:"
-              echo "do not pin."
+              echo "Runs on any machine. It needs no Fhenix credential and no GitHub"
+              echo "account. A non-zero exit means: do not pin."
               echo
-              echo '```'
-              echo "cosign verify ${IMAGE_REGISTRY}@${AMD64_DIGEST} \\"
-              echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
-              echo "  --certificate-identity ${IDENTITY} \\"
-              echo "  --certificate-github-workflow-repository ${REPO} \\"
-              echo "  --certificate-github-workflow-ref ${REF} \\"
-              echo "  --certificate-github-workflow-sha ${COMMIT}"
+              echo '```bash'
+              echo "curl -sL https://api.github.com/repos/${REPO}/attestations/${AMD64_DIGEST} \\"
+              echo "  | jq '.attestations[0].bundle' > bundle.json"
+              echo
+              echo "gh attestation verify oci://${IMAGE_REGISTRY}@${AMD64_DIGEST} \\"
+              echo "  --bundle bundle.json \\"
+              echo "  --repo ${REPO} \\"
+              echo "  --signer-workflow ${SIGNER_WORKFLOW} \\"
+              echo "  --source-ref ${REF} \\"
+              echo "  --source-digest ${COMMIT}"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
