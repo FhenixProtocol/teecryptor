@@ -147,6 +147,8 @@ struct Config {
     /// Max in-flight requests before the 204 overload backstop. Default 1000.
     /// Env: `MAX_INFLIGHT`.
     max_inflight: usize,
+    /// OTLP metrics push on/off, baked per-env (`env_policy`).
+    metrics_push: bool,
 }
 
 /// Read an env var, or fall back to `default`. Shared by `Config::from_env`
@@ -270,6 +272,7 @@ impl Config {
             commitment_verifier,
             decrypt_concurrency,
             max_inflight,
+            metrics_push: policy.metrics_push,
         })
     }
 }
@@ -785,11 +788,12 @@ async fn main() -> Result<()> {
     }
     let health = teecryptor::metrics::Health::new(probed, served_chains.clone());
 
-    // Push is not configuration: every real build pushes to the compiled-in
-    // Google endpoint (see `GOOGLE_TELEMETRY_ENDPOINT` for why), and only the
-    // mock (local dev) build is scrape-only — a dev machine has no VM identity
-    // to push as.
-    let metrics = if cfg!(feature = "mock") {
+    // The push destination is not configuration: real builds push to the
+    // compiled-in Google endpoint (see `GOOGLE_TELEMETRY_ENDPOINT` for why).
+    // Whether to push at all is baked per-env (`metrics_push`, default off). The
+    // mock (local dev) build is always scrape-only — a dev machine has no VM
+    // identity to push as.
+    let metrics = if cfg!(feature = "mock") || !cfg.metrics_push {
         teecryptor::metrics::Metrics::new(served_chains)
     } else {
         info!(
@@ -1440,6 +1444,7 @@ mod tests {
             require_permit: true,
             enable_commitment_verification: false,
             commitment: None,
+            metrics_push: true,
         };
         let err = parse_commitment_config(&policy).expect_err("expected a fail-closed error");
         let msg = format!("{err:#}");

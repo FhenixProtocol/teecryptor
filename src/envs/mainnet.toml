@@ -11,6 +11,9 @@
 require_permit                 = true
 enable_commitment_verification = true
 
+# Push metrics over OTLP (default off); the :9090 exposition is served either way.
+metrics_push = true
+
 [commitment]
 version                        = "0x0000000000000000000000000000000000000000000000000000000000000002"
 registry_address               = "TBD"
