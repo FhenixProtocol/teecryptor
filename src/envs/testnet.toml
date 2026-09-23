@@ -12,6 +12,9 @@
 require_permit                 = true
 enable_commitment_verification = true
 
+# Push metrics over OTLP (default off); the :9090 exposition is served either way.
+metrics_push = true
+
 # Present because the commitment gate is on. The registry is the one cofhe's
 # blockchain-poster writes to for testnet-v2: a single contract on Arbitrum
 # Sepolia (chain 421614) serving all three host chains, keyed by

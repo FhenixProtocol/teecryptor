@@ -147,8 +147,7 @@ struct Config {
     /// Max in-flight requests before the 204 overload backstop. Default 1000.
     /// Env: `MAX_INFLIGHT`.
     max_inflight: usize,
-    /// OTLP metrics push on/off, baked per-env (`env_policy`). Unused in mock mode.
-    #[cfg_attr(feature = "mock", allow(dead_code))]
+    /// OTLP metrics push on/off, baked per-env (`env_policy`).
     metrics_push: bool,
 }
 
@@ -791,13 +790,10 @@ async fn main() -> Result<()> {
 
     // The push destination is not configuration: real builds push to the
     // compiled-in Google endpoint (see `GOOGLE_TELEMETRY_ENDPOINT` for why).
-    // Whether to push at all is baked per-env (`metrics_push`, default on). The
+    // Whether to push at all is baked per-env (`metrics_push`, default off). The
     // mock (local dev) build is always scrape-only — a dev machine has no VM
     // identity to push as.
-    let metrics = if cfg!(feature = "mock") {
-        teecryptor::metrics::Metrics::new(served_chains)
-    } else if !cfg.metrics_push {
-        info!("metrics: OTLP push disabled by baked env policy (metrics_push = false)");
+    let metrics = if cfg!(feature = "mock") || !cfg.metrics_push {
         teecryptor::metrics::Metrics::new(served_chains)
     } else {
         info!(

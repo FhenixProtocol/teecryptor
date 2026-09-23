@@ -36,14 +36,10 @@ pub struct EnvPolicy {
     #[serde(default)]
     pub commitment: Option<CommitmentPolicy>,
     /// OTLP push of metrics to the compiled-in Telemetry endpoint. Defaults to
-    /// on; an env opts out with `metrics_push = false`. Baked rather than an env
-    /// var so an operator cannot silence monitoring on an attested image.
-    #[serde(default = "default_true")]
+    /// off; an env opts in with `metrics_push = true`. Baked rather than an env
+    /// var so an operator cannot toggle monitoring on an attested image.
+    #[serde(default)]
     pub metrics_push: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// The baked commitment-gate detail (non-secret; the API-keyed RPC URL is env).
@@ -284,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn metrics_push_defaults_on() {
+    fn metrics_push_is_baked_on() {
         assert!(EnvPolicy::for_env("testnet").unwrap().metrics_push);
         assert!(EnvPolicy::for_env("mainnet").unwrap().metrics_push);
     }
