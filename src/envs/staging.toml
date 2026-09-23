@@ -12,9 +12,6 @@
 require_permit                 = true
 enable_commitment_verification = true
 
-# No OTLP metrics push from staging (default is on). The :9090 exposition stays up.
-metrics_push = false
-
 # Present because the commitment gate is on. registry_address is the public
 # CommitmentRegistry contract; the (API-keyed) RPC URL stays env-supplied.
 # warning_instead_of_enforcement = run the gate but log-and-allow on failure (rollout mode).
