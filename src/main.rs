@@ -794,6 +794,7 @@ async fn main() -> Result<()> {
     // mock (local dev) build is always scrape-only — a dev machine has no VM
     // identity to push as.
     let metrics = if cfg!(feature = "mock") || !cfg.metrics_push {
+        info!("metrics: OTLP push disabled (baked metrics_push=false); scrape only");
         teecryptor::metrics::Metrics::new(served_chains)
     } else {
         info!(
