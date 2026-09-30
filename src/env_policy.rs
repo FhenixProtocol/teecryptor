@@ -182,9 +182,11 @@ impl EnvPolicy {
         // that `for_env` rejects as impossible.)
         let commitment = if enable_commitment_verification {
             Some(CommitmentPolicy {
-                version: std::env::var("COMMITMENT_VERSION").unwrap_or_else(|_| {
-                    "0x0000000000000000000000000000000000000000000000000000000000000002".to_string()
-                }),
+                // No default: the local stack must pass the same value it gives
+                // fhe-engine, or decrypts read a bucket the engine never wrote.
+                version: non_empty("COMMITMENT_VERSION").context(
+                    "COMMITMENT_VERSION must be set (and non-empty) when commitment verification is on",
+                )?,
                 registry_address: resolve_registry_address(
                     non_empty("COMMITMENT_REGISTRY_ADDRESS_FILE").as_deref(),
                     non_empty("COMMITMENT_REGISTRY_ADDRESS").as_deref(),
