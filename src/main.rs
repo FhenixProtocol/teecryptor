@@ -6,6 +6,7 @@
 //! With `--features mock`, the GCP chain is skipped and a throwaway ClientKey is
 //! generated for local development only.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -133,6 +134,9 @@ struct Config {
     /// `PERMIT_CHAINS_JSON`. `Some` when the env var is set with a non-empty
     /// map. Required when `require_permit` is true; otherwise informational.
     acp_verifier: Option<teecryptor::permit::ChainsVerifierConfig>,
+    /// The chains from `PERMIT_CHAINS_JSON` awaiting resolution; `resolve_acp`
+    /// turns them into `acp_verifier` at boot.
+    acp_pending: Option<HashMap<u64, teecryptor::permit::PendingChain>>,
     /// When `true` (default, fail-closed), `/decrypt` and `/sealoutput` reject
     /// any handle lacking an on-chain commitment. Baked per-env (`env_policy`),
     /// was `REQUIRE_COMMITMENT`.
@@ -198,8 +202,8 @@ impl Config {
         // env-supplied via PERMIT_CHAINS_JSON. Gate on but no chains → boot bails,
         // so an open decryptor can't be served by forgetting the chains.
         let require_permit = policy.require_permit;
-        let acp_verifier = parse_permit_chains()?;
-        if require_permit && acp_verifier.is_none() {
+        let acp_pending = parse_permit_chains(&policy.acl)?;
+        if require_permit && acp_pending.is_none() {
             anyhow::bail!(
                 "require_permit is baked on for this environment but PERMIT_CHAINS_JSON is not \
                  configured — set it with at least one chain"
@@ -265,7 +269,8 @@ impl Config {
             bind_addr: env_or("BIND_ADDR", "0.0.0.0:8080"),
             metrics_addr: env_or("METRICS_ADDR", "0.0.0.0:9090"),
             require_permit,
-            acp_verifier,
+            acp_verifier: None,
+            acp_pending,
             enable_commitment_verification,
             commitment_verifier,
             decrypt_concurrency,
@@ -289,47 +294,83 @@ fn validate_threshold(threshold: u8, partner_count: usize) -> Result<()> {
     Ok(())
 }
 
-/// The CoFHE `TaskManager` contract address. It is deployed deterministically, so it
-/// is the SAME on every host chain and in every environment — baked as one attested
-/// constant rather than per-chain operator input, so a `setMetadata`-capable operator
-/// cannot point the permit gate at a TaskManager they control. Non-secret (a public
-/// contract address); only the API-keyed RPC URLs stay env-supplied. Validated at
-/// compile time by `address!`, so a typo in it is a build error, not a boot failure.
-const TASK_MANAGER: alloy::primitives::Address =
-    alloy::primitives::address!("0xeA30c4B8b44078Bbf8a6ef5b9f1eC1626C7848D9");
+impl Config {
+    /// Resolve every served chain's TaskManager through the address book — boot
+    /// only, so a later `setTm` on the book takes effect here on the next deploy,
+    /// not before. Fail-closed: any chain that cannot be resolved aborts the boot.
+    async fn resolve_acp(&mut self) -> Result<()> {
+        let Some(pending) = self.acp_pending.take() else {
+            return Ok(());
+        };
+        if !self.require_permit {
+            // Only reachable on the mock/local path, where require_permit is an env
+            // toggle; every baked env has it on, so this is compiled out of the
+            // attested production binary.
+            #[cfg(feature = "mock")]
+            tracing::warn!(
+                "ACP verifier env is set but require_permit=false — ACPs will be ignored"
+            );
+            return Ok(());
+        }
+        let verifier = teecryptor::permit::ChainsVerifierConfig::resolve(pending)
+            .await
+            .map_err(|(chain_id, e)| {
+                anyhow::anyhow!("chain {chain_id}: {e}")
+                    .context("resolving the TaskManager through the address book (fail-closed)")
+            })?;
+        for (chain_id, chain) in &verifier.chains {
+            info!(
+                chain_id,
+                task_manager = %chain.task_manager,
+                "TaskManager resolved through the address book"
+            );
+        }
+        self.acp_verifier = Some(verifier);
+        Ok(())
+    }
+}
 
-/// Parse `PERMIT_CHAINS_JSON` into a [`ChainsVerifierConfig`].
+/// Parse `PERMIT_CHAINS_JSON` into the chains to resolve at boot.
 ///
 /// Format: a JSON object mapping `host_chain_id` (as a string, since JSON
 /// object keys are strings) to per-chain settings — only the API-keyed RPC URL
-/// (+ optional `timeout_ms`); the TaskManager address is baked
-/// ([`TASK_MANAGER`]), not carried here:
+/// (+ optional `timeout_ms` and `retries`). The TaskManager is never carried here: it is
+/// resolved at boot through the baked address book, by the TaskManager id the
+/// baked policy pins for that chain (`[acl] task_manager_ids`), so an operator
+/// can at most select among TaskManagers the book owner registered.
 ///
 /// ```json
 /// {
-///   "1":      { "rpc_url": "https://eth.llamarpc.com", "timeout_ms": 5000 },
+///   "1":      { "rpc_url": "https://eth.llamarpc.com", "timeout_ms": 5000, "retries": 2 },
 ///   "420105": { "rpc_url": "http://localhost:8545" }
 /// }
 /// ```
 ///
-/// `timeout_ms` is optional (default: 5000). `Ok(None)` is returned if the env
+/// `timeout_ms` is optional (default: 5000), as is `retries` (default: 2): how many
+/// further attempts the boot-time address-book query gets after a transient RPC
+/// failure, one second apart. `Ok(None)` is returned if the env
 /// var is unset or `"{}"`; that's equivalent to "no verifier installed", and
-/// the caller cross-checks against the baked `require_permit` policy.
-fn parse_permit_chains() -> Result<Option<teecryptor::permit::ChainsVerifierConfig>> {
-    use std::collections::HashMap;
-    use teecryptor::permit::{ChainConfig, ChainsVerifierConfig};
+/// the caller cross-checks against the baked `require_permit` policy. A chain
+/// the policy has no id for is an error naming the chain.
+fn parse_permit_chains(
+    acl: &env_policy::AclPolicy,
+) -> Result<Option<HashMap<u64, teecryptor::permit::PendingChain>>> {
+    use teecryptor::permit::PendingChain;
 
-    /// Per-entry wire shape inside `PERMIT_CHAINS_JSON`. Carries only the API-keyed
-    /// RPC URL (+ optional timeout); the TaskManager address is baked
-    /// (`TASK_MANAGER`), not operator-supplied.
+    /// Per-entry wire shape inside `PERMIT_CHAINS_JSON`.
     #[derive(serde::Deserialize)]
     struct ChainEntry {
         rpc_url: String,
         #[serde(default = "default_timeout_ms")]
         timeout_ms: u64,
+        #[serde(default = "default_retries")]
+        retries: u32,
     }
     fn default_timeout_ms() -> u64 {
         5000
+    }
+    fn default_retries() -> u32 {
+        2
     }
 
     let raw = match std::env::var("PERMIT_CHAINS_JSON") {
@@ -343,24 +384,29 @@ fn parse_permit_chains() -> Result<Option<teecryptor::permit::ChainsVerifierConf
         return Ok(None);
     }
 
-    let mut chains: HashMap<u64, ChainConfig> = HashMap::with_capacity(parsed.len());
+    let mut chains: HashMap<u64, PendingChain> = HashMap::with_capacity(parsed.len());
     for (chain_id_str, entry) in parsed {
         let chain_id: u64 = chain_id_str.parse().with_context(|| {
             format!("PERMIT_CHAINS_JSON: chain id {chain_id_str:?} is not a u64")
         })?;
-        // TaskManager is the baked `TASK_MANAGER` constant (deterministic + identical
-        // on every chain and env, so attested rather than operator-settable). Builds
-        // the pooled provider once here (fail-fast on a bad rpc_url) so every verify
-        // call reuses the warm connection instead of dialing cold.
-        let chain_cfg = ChainConfig::new(
-            entry.rpc_url,
-            TASK_MANAGER,
-            Duration::from_millis(entry.timeout_ms),
-        )
-        .with_context(|| format!("PERMIT_CHAINS_JSON[{chain_id}]: invalid rpc_url"))?;
-        chains.insert(chain_id, chain_cfg);
+        let task_manager_id = acl.task_manager_id(chain_id).with_context(|| {
+            format!(
+                "PERMIT_CHAINS_JSON[{chain_id}]: the baked policy has no TaskManager id for this \
+                 chain — add it under [acl] task_manager_ids (rebuild + re-pin) or stop serving it"
+            )
+        })?;
+        chains.insert(
+            chain_id,
+            PendingChain {
+                rpc_url: entry.rpc_url,
+                timeout: Duration::from_millis(entry.timeout_ms),
+                address_book: acl.address_book,
+                task_manager_id,
+                retries: entry.retries,
+            },
+        );
     }
-    Ok(Some(ChainsVerifierConfig { chains }))
+    Ok(Some(chains))
 }
 
 /// Parse the commitment-registry verifier from env.
@@ -648,7 +694,8 @@ async fn main() -> Result<()> {
         .install_default()
         .expect("install rustls ring crypto provider");
 
-    let cfg = Config::from_env()?;
+    let mut cfg = Config::from_env()?;
+    cfg.resolve_acp().await?;
 
     // Real path: reconstruct the FHE-priv secret across the partners and assemble the
     // in-memory handles. The decrypt-path signer is bundled in the secret, so it's
@@ -698,13 +745,6 @@ async fn main() -> Result<()> {
                 .expect("require_permit but no acp_verifier — bug in Config::from_env"),
         );
         info!("ACP verification enabled (baked require_permit=true)");
-    }
-    // Only reachable on the mock/local path, where require_permit is an env toggle;
-    // every baked (non-mock) env has require_permit=true, so this is compiled out of
-    // the attested production binary.
-    #[cfg(feature = "mock")]
-    if !cfg.require_permit && cfg.acp_verifier.is_some() {
-        tracing::warn!("ACP verifier env is set but require_permit=false — ACPs will be ignored");
     }
     if cfg.enable_commitment_verification {
         // enable_commitment_verification guarantees commitment_verifier is Some (checked in
@@ -1076,7 +1116,7 @@ mod tests {
     /// can reach later checks. Non-secret stub values. Only the real-boot-path
     /// tests use it; mock builds source the gates from env.
     #[cfg(not(feature = "mock"))]
-    const STUB_CHAINS: &str = r#"{"1":{"rpc_url":"http://x"}}"#;
+    const STUB_CHAINS: &str = r#"{"84532":{"rpc_url":"http://x"}}"#;
 
     /// A minimal valid non-mock boot: COFHE_ENV=testnet + a stub permit chain
     /// (permit gate is baked ON in every env) + a CT source + a stub registry RPC.
@@ -1089,6 +1129,17 @@ mod tests {
         std::env::set_var("CT_SOURCE_URL", "http://x");
         std::env::set_var("PERMIT_CHAINS_JSON", STUB_CHAINS);
         std::env::set_var("COMMITMENT_REGISTRY_RPC_URL", "http://x");
+    }
+
+    /// The testnet policy bakes ids for its three host chains only; serving chain 1
+    /// (Ethereum mainnet) from a testnet image is refused before any RPC call.
+    #[cfg(not(feature = "mock"))]
+    #[test]
+    fn config_rejects_a_served_chain_without_a_baked_task_manager_id() {
+        let _g = EnvGuard::new(KEYS);
+        set_valid_testnet_baseline();
+        std::env::set_var("PERMIT_CHAINS_JSON", r#"{"1":{"rpc_url":"http://x"}}"#);
+        assert_from_env_errors_with("TaskManager id");
     }
 
     /// Assert `Config::from_env()` errors and its anyhow chain mentions `needle`.
@@ -1195,7 +1246,9 @@ mod tests {
         let _g = EnvGuard::new(KEYS);
         std::env::set_var("COFHE_ENV", "mainnet");
         std::env::set_var("CT_SOURCE_URL", "http://x");
-        std::env::set_var("PERMIT_CHAINS_JSON", STUB_CHAINS);
+        // A chain the mainnet policy bakes an id for; the testnet stub would be
+        // refused earlier, at the id lookup.
+        std::env::set_var("PERMIT_CHAINS_JSON", r#"{"1":{"rpc_url":"http://x"}}"#);
         assert_from_env_errors_with("COMMITMENT_REGISTRY_RPC_URL");
     }
 
@@ -1309,7 +1362,17 @@ mod tests {
     #[test]
     fn permit_chains_unset_yields_none() {
         let _g = EnvGuard::new(KEYS);
-        assert!(parse_permit_chains().expect("parse").is_none());
+        assert!(parse_permit_chains(&test_acl(&[(1, 1), (420105, 1)]))
+            .expect("parse")
+            .is_none());
+    }
+
+    fn test_acl(ids: &[(u64, u64)]) -> env_policy::AclPolicy {
+        env_policy::AclPolicy {
+            address_book: env_policy::COFHE_ADDRESS_BOOK,
+            task_manager_ids: ids.iter().map(|(c, i)| (c.to_string(), *i)).collect(),
+            default_task_manager_id: None,
+        }
     }
 
     #[test]
@@ -1318,35 +1381,53 @@ mod tests {
         std::env::set_var(
             "PERMIT_CHAINS_JSON",
             r#"{
-                "1":      { "rpc_url": "https://eth.example", "timeout_ms": 7000 },
+                "1":      { "rpc_url": "https://eth.example", "timeout_ms": 7000, "retries": 5 },
                 "420105": { "rpc_url": "http://localhost:8545" }
             }"#,
         );
-        let verifier = parse_permit_chains()
+        let pending = parse_permit_chains(&test_acl(&[(1, 1), (420105, 3)]))
             .expect("parse")
-            .expect("acp_verifier present");
-        assert_eq!(verifier.len(), 2);
+            .expect("acp chains present");
+        assert_eq!(pending.len(), 2);
 
-        let eth = verifier.get(1).expect("chain 1 present");
+        let eth = pending.get(&1).expect("chain 1 present");
         assert_eq!(eth.rpc_url, "https://eth.example");
         assert_eq!(eth.timeout, Duration::from_millis(7000));
-        // TaskManager comes from the baked constant, not the env JSON.
-        assert_eq!(eth.task_manager, TASK_MANAGER);
+        // The TaskManager is resolved at boot through the baked book, by the baked id.
+        assert_eq!(eth.address_book, env_policy::COFHE_ADDRESS_BOOK);
+        assert_eq!(eth.task_manager_id, 1);
+        assert_eq!(eth.retries, 5);
 
-        let local = verifier.get(420105).expect("chain 420105 present");
+        let local = pending.get(&420105).expect("chain 420105 present");
         assert_eq!(local.rpc_url, "http://localhost:8545");
-        // timeout default = 5000ms when omitted
+        // timeout default = 5000ms, retries default = 2 when omitted
         assert_eq!(local.timeout, Duration::from_millis(5000));
+        assert_eq!(local.task_manager_id, 3);
+        assert_eq!(local.retries, 2);
 
-        // A chain not in the map is None.
-        assert!(verifier.get(999_999).is_none());
+        assert!(!pending.contains_key(&999_999));
+    }
+
+    /// A served chain the baked policy has no TaskManager id for is refused up
+    /// front, naming the chain, rather than resolved against a guessed id.
+    #[test]
+    fn permit_chain_without_a_task_manager_id_is_rejected() {
+        let _g = EnvGuard::new(KEYS);
+        std::env::set_var(
+            "PERMIT_CHAINS_JSON",
+            r#"{ "1": { "rpc_url": "http://x" }, "420105": { "rpc_url": "http://y" } }"#,
+        );
+        let err = parse_permit_chains(&test_acl(&[(1, 1)])).expect_err("chain 420105 has no id");
+        assert!(format!("{err:#}").contains("420105"), "{err:#}");
     }
 
     #[test]
     fn permit_chains_empty_object_yields_none() {
         let _g = EnvGuard::new(KEYS);
         std::env::set_var("PERMIT_CHAINS_JSON", "{}");
-        assert!(parse_permit_chains().expect("parse").is_none());
+        assert!(parse_permit_chains(&test_acl(&[(1, 1), (420105, 1)]))
+            .expect("parse")
+            .is_none());
     }
 
     #[test]
@@ -1356,7 +1437,10 @@ mod tests {
             "PERMIT_CHAINS_JSON",
             r#"{ "not-a-number": { "rpc_url": "http://x" } }"#,
         );
-        let e = format!("{:#}", parse_permit_chains().unwrap_err());
+        let e = format!(
+            "{:#}",
+            parse_permit_chains(&test_acl(&[(1, 1), (420105, 1)])).unwrap_err()
+        );
         assert!(e.contains("not a u64"), "{e}");
     }
 
@@ -1456,6 +1540,11 @@ mod tests {
             require_permit: true,
             enable_commitment_verification: false,
             commitment: None,
+            acl: env_policy::AclPolicy {
+                address_book: env_policy::COFHE_ADDRESS_BOOK,
+                task_manager_ids: Default::default(),
+                default_task_manager_id: None,
+            },
         };
         let err = parse_commitment_config(&policy).expect_err("expected a fail-closed error");
         let msg = format!("{err:#}");

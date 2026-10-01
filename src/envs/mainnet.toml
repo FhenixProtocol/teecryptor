@@ -15,3 +15,9 @@ enable_commitment_verification = true
 version                        = "0x0000000000000000000000000000000000000000000000000000000000000002"
 registry_address               = "TBD"
 warning_instead_of_enforcement = false
+
+# ACL gate: the TaskManager is resolved at boot through the attested address book as
+# `getTm(id)`, per served chain (Ethereum 1, Arbitrum One 42161). Id 1 is what the
+# 0.4.x FHE.sol release pins; confirm it against the mainnet deploy before the first boot.
+[acl]
+task_manager_ids = { 1 = 1, 42161 = 1 }

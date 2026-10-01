@@ -16,8 +16,22 @@
 //! (`COMMITMENT_REGISTRY_RPC_URL`, `PERMIT_CHAINS_JSON`) carry API keys that must
 //! not be embedded in a publicly-pullable image.
 
+use std::collections::BTreeMap;
+
+use alloy::primitives::{address, Address};
 use anyhow::{Context, Result};
 use serde::Deserialize;
+
+/// The CoFHE address book: a CREATE2 proxy at the SAME address on every host chain,
+/// which maps a TaskManager id to the TaskManager deployed on that chain. Baked as one
+/// attested constant (validated at compile time by `address!`), never read from the
+/// environment on the real boot path. The TaskManager itself is resolved from it at
+/// boot — see `AclPolicy`.
+pub const COFHE_ADDRESS_BOOK: Address = address!("0xC0F4e00E531a2B086492Ae3DCC1515038307196b");
+
+fn canonical_address_book() -> Address {
+    COFHE_ADDRESS_BOOK
+}
 
 /// The per-environment constants baked into the image. Every environment has the
 /// same top-level shape; the commitment gate's detail travels as one optional
@@ -35,6 +49,40 @@ pub struct EnvPolicy {
     /// (API-keyed); only the public address/version/avoid-enforcement are baked.
     #[serde(default)]
     pub commitment: Option<CommitmentPolicy>,
+    /// ACL-gate detail: which TaskManager id each served chain resolves through the
+    /// address book. Always present — every baked env runs the permit gate.
+    pub acl: AclPolicy,
+}
+
+/// The baked ACL-gate detail. The address book is a compile-time constant; only the
+/// per-chain TaskManager id is per environment, so an env can lag on an older FHE.sol
+/// release without a code change. Changing an id is a rebuild + partner re-pin.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AclPolicy {
+    /// The address book every chain is queried through. Not settable from TOML
+    /// (`skip`): it is [`COFHE_ADDRESS_BOOK`], overridden only by mock builds for
+    /// the local stack, whose book has a different owner and so a different address.
+    #[serde(skip, default = "canonical_address_book")]
+    pub address_book: Address,
+    /// `host_chain_id -> TaskManager id`, keyed as strings because TOML keys are.
+    /// Validated to be numeric by `EnvPolicy::parse`.
+    pub task_manager_ids: BTreeMap<String, u64>,
+    /// Mock builds only: one id for every chain, since the local stack serves one
+    /// chain and reads the id from the environment. `skip` keeps TOML from setting it.
+    #[serde(skip)]
+    pub default_task_manager_id: Option<u64>,
+}
+
+impl AclPolicy {
+    /// The TaskManager id to resolve for `chain_id`, or `None` when the policy has no
+    /// entry for it — a chain in `PERMIT_CHAINS_JSON` without one fails the boot.
+    pub fn task_manager_id(&self, chain_id: u64) -> Option<u64> {
+        self.task_manager_ids
+            .get(&chain_id.to_string())
+            .copied()
+            .or(self.default_task_manager_id)
+    }
 }
 
 /// The baked commitment-gate detail (non-secret; the API-keyed RPC URL is env).
@@ -67,6 +115,13 @@ impl EnvPolicy {
                  (fail-closed; add src/envs/{other}.toml)"
             ),
         };
+        Self::parse(raw, env)
+    }
+
+    /// Parse and validate one baked policy document. Split from `for_env` so the
+    /// invariants can be tested against inline TOML.
+    #[cfg(not(feature = "mock"))]
+    pub fn parse(raw: &str, env: &str) -> Result<Self> {
         let policy: EnvPolicy =
             toml::from_str(raw).with_context(|| format!("parsing baked env policy for {env:?}"))?;
         // The commitment switch and the presence of a [commitment] block must
@@ -80,6 +135,16 @@ impl EnvPolicy {
                 } else {
                     "missing"
                 }
+            );
+        }
+        for key in policy.acl.task_manager_ids.keys() {
+            key.parse::<u64>().with_context(|| {
+                format!("baked policy for {env:?}: [acl] task_manager_ids key {key:?} is not a chain id")
+            })?;
+        }
+        if policy.require_permit && policy.acl.task_manager_ids.is_empty() {
+            anyhow::bail!(
+                "baked policy for {env:?}: require_permit=true but [acl] task_manager_ids is empty"
             );
         }
         Ok(policy)
@@ -132,10 +197,27 @@ impl EnvPolicy {
         } else {
             None
         };
+        // The local stack's book is owned by the dev deployer, so it sits at a
+        // different CREATE2 address than the canonical one; one id serves its one chain.
+        let address_book = match non_empty("ADDRESS_BOOK_ADDRESS") {
+            Some(raw) => raw
+                .parse()
+                .with_context(|| "ADDRESS_BOOK_ADDRESS must be a 0x-prefixed Ethereum address")?,
+            None => COFHE_ADDRESS_BOOK,
+        };
+        let default_task_manager_id = std::env::var("TASK_MANAGER_ID")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse()
+            .context("TASK_MANAGER_ID must be an unsigned integer")?;
         Ok(Self {
             require_permit: flag("REQUIRE_PERMIT", "true")?,
             enable_commitment_verification,
             commitment,
+            acl: AclPolicy {
+                address_book,
+                task_manager_ids: BTreeMap::new(),
+                default_task_manager_id: Some(default_task_manager_id),
+            },
         })
     }
 }
@@ -174,6 +256,66 @@ fn resolve_registry_address(file: Option<&str>, literal: Option<&str>) -> Result
 #[cfg(all(test, feature = "mock"))]
 mod mock_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Env-var tests race under cargo's parallel runner; serialize them.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_acl_env<T>(book: Option<&str>, id: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (k, v) in [("ADDRESS_BOOK_ADDRESS", book), ("TASK_MANAGER_ID", id)] {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+        std::env::set_var("ENABLE_COMMITMENT_VERIFICATION", "false");
+        let out = f();
+        for k in [
+            "ADDRESS_BOOK_ADDRESS",
+            "TASK_MANAGER_ID",
+            "ENABLE_COMMITMENT_VERIFICATION",
+        ] {
+            std::env::remove_var(k);
+        }
+        out
+    }
+
+    /// The local stack's book has a different owner, so its address comes from env;
+    /// the id applies to every chain and defaults to 1.
+    #[test]
+    fn mock_acl_comes_from_env_with_defaults() {
+        with_acl_env(None, None, || {
+            let p = EnvPolicy::from_env_mock().expect("policy");
+            assert_eq!(p.acl.address_book, COFHE_ADDRESS_BOOK);
+            assert_eq!(p.acl.task_manager_id(420105), Some(1));
+        });
+        with_acl_env(
+            Some("0x00000000000000000000000000000000000000bb"),
+            Some("7"),
+            || {
+                let p = EnvPolicy::from_env_mock().expect("policy");
+                assert_eq!(
+                    p.acl.address_book,
+                    "0x00000000000000000000000000000000000000bb"
+                        .parse::<Address>()
+                        .unwrap()
+                );
+                assert_eq!(p.acl.task_manager_id(420105), Some(7));
+                assert_eq!(p.acl.task_manager_id(1), Some(7));
+            },
+        );
+    }
+
+    #[test]
+    fn mock_rejects_a_malformed_book_address_or_id() {
+        with_acl_env(Some("not-an-address"), None, || {
+            assert!(EnvPolicy::from_env_mock().is_err());
+        });
+        with_acl_env(None, Some("one"), || {
+            assert!(EnvPolicy::from_env_mock().is_err());
+        });
+    }
 
     const ADDRESS: &str = "0x2F7F4Ea04A0213C114b1070909a7f70cbaB2A909";
 
@@ -253,6 +395,48 @@ mod mock_tests {
 #[cfg(all(test, not(feature = "mock")))]
 mod tests {
     use super::*;
+
+    /// Every served chain maps to a TaskManager id; an unknown chain has none, and
+    /// the book address is the canonical CREATE2 address, not something TOML can set.
+    #[test]
+    fn testnet_policy_pins_a_task_manager_id_per_chain() {
+        let p = EnvPolicy::for_env("testnet").expect("testnet policy");
+        for chain in [84532u64, 11155111, 421614] {
+            assert_eq!(p.acl.task_manager_id(chain), Some(1), "chain {chain}");
+        }
+        assert_eq!(p.acl.task_manager_id(1), None);
+        assert_eq!(p.acl.address_book, COFHE_ADDRESS_BOOK);
+    }
+
+    #[test]
+    fn acl_block_is_required() {
+        let raw = "require_permit = true\nenable_commitment_verification = false\n";
+        assert!(EnvPolicy::parse(raw, "x").is_err());
+    }
+
+    #[test]
+    fn acl_chain_keys_must_be_chain_ids() {
+        let raw = "require_permit = true\nenable_commitment_verification = false\n\
+                   [acl]\ntask_manager_ids = { base = 1 }\n";
+        let err = EnvPolicy::parse(raw, "x").unwrap_err();
+        assert!(format!("{err:#}").contains("base"), "{err:#}");
+    }
+
+    #[test]
+    fn permit_gate_on_needs_at_least_one_task_manager_id() {
+        let raw = "require_permit = true\nenable_commitment_verification = false\n\
+                   [acl]\ntask_manager_ids = { }\n";
+        let err = EnvPolicy::parse(raw, "x").unwrap_err();
+        assert!(format!("{err:#}").contains("task_manager_ids"), "{err:#}");
+    }
+
+    #[test]
+    fn toml_cannot_override_the_address_book() {
+        let raw = "require_permit = true\nenable_commitment_verification = false\n\
+                   [acl]\naddress_book = \"0x00000000000000000000000000000000000000aa\"\n\
+                   task_manager_ids = { 1 = 1 }\n";
+        assert!(EnvPolicy::parse(raw, "x").is_err());
+    }
 
     #[test]
     fn staging_policy_matches_baked_values() {

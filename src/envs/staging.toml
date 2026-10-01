@@ -19,3 +19,10 @@ enable_commitment_verification = true
 version                        = "0x0000000000000000000000000000000000000000000000000000000000000002"
 registry_address               = "0x8045cb9b8b179139181b5d6129D1556B7a5a4C48"
 warning_instead_of_enforcement = true
+
+# ACL gate: the TaskManager is resolved at boot through the attested address book
+# (`COFHE_ADDRESS_BOOK` in env_policy.rs) as `getTm(id)`, per served chain. The id is
+# the one the environment's FHE.sol release pins (1 for cofhe-contracts 0.4.x).
+# A chain in PERMIT_CHAINS_JSON without an entry here refuses to boot.
+[acl]
+task_manager_ids = { 420105 = 1, 84532 = 1, 11155111 = 1, 421614 = 1 }
