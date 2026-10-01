@@ -163,8 +163,8 @@ impl Metrics {
         Self::build(served_chain_ids, None).expect("infallible without a push exporter")
     }
 
-    /// Like [`Metrics::new`], but pushing: the instruments feed a periodic
-    /// OTLP exporter to `settings.endpoint`, and no scrape registry exists.
+    /// Like [`Metrics::new`], but pushing: the instruments also feed a periodic
+    /// OTLP exporter to `settings.endpoint`. The scrape registry is still built.
     /// Runs on a plain thread — construction reads the metadata server with a
     /// blocking client, which async contexts refuse.
     pub fn with_otlp(
