@@ -1,6 +1,6 @@
 # Baked security policy — "mainnet" environment (six key-share holders, threshold 3).
 #
-# The permit gate is ON. The commitment gate is baked ON and ENFORCING (v1,
+# The permit gate is ON. The commitment gate is baked ON and ENFORCING (v2,
 # warning_instead_of_enforcement = false), but the CommitmentRegistry contract for
 # mainnet is not deployed yet — registry_address is a "TBD" placeholder. This is
 # deliberately NOT bootable until the real address is filled in AND the (API-keyed)
