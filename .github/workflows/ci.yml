@@ -102,9 +102,15 @@ jobs:
           context: .
           platforms: linux/amd64
           push: false
+          load: true
+          tags: teecryptor:ci
           provenance: false
           cache-from: type=gha,scope=pr-amd64
           cache-to: type=gha,mode=max,scope=pr-amd64
+      # A build that succeeds can still produce an image that cannot start, for
+      # example a binary that needs a newer glibc than the runtime stage has.
+      - name: Image boots
+        run: ./scripts/check-image-boots.sh teecryptor:ci
 
   # Full-history secret scan. History is clean at publication; this gate keeps
   # every commit clean after the repo is public.
