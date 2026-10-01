@@ -167,6 +167,31 @@ jobs:
           pattern: digests-*-${{ github.run_id }}
           merge-multiple: true
 
+      # Run the amd64 platform digest before anything names it. Provenance proves
+      # who built an image, not that it starts. If the binary cannot load, this
+      # step fails, so the image gets no tag, no :latest and no attestation, and
+      # a partner check on the digest refuses it. CI runs the same check on every
+      # pull request.
+      - name: Image boots (amd64)
+        id: boots
+        run: ./scripts/check-image-boots.sh "${IMAGE_REGISTRY}@$(cat "${RUNNER_TEMP}/digests/linux-amd64")"
+
+      # The digest summary below needs the manifest step, which a boot failure
+      # skips. Record the broken digest here, so the operator still sees it.
+      - name: Report boot failure
+        if: failure() && steps.boots.outcome == 'failure'
+        run: |
+          {
+            echo "> ### IMAGE DOES NOT BOOT — DO NOT HAND THIS TO A PARTNER"
+            echo ">"
+            echo "> The amd64 image failed the boot check. It has no tag, no :latest and"
+            echo "> no attestation. Fix the build; a re-run builds the same broken image."
+            echo
+            echo '```'
+            echo "${IMAGE_REGISTRY}@$(cat "${RUNNER_TEMP}/digests/linux-amd64")"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Create + push multi-arch manifest
         id: manifest
         env:
