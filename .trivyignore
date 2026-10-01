@@ -10,3 +10,12 @@
 # Revisit: drop this line once deb12 publishes a fixed libssl3 (the real fix is to
 # move to an OpenSSL-free base — tracked separately).
 CVE-2026-14456
+
+# CVE-2026-84782 — OpenSSL (libssl3) information disclosure.
+# Source: the distroless/cc-debian12 base image ships libssl3 3.0.20-1~deb12u2;
+# Debian had no fixed version as of 2026-10-01 (unfixable at build time).
+# Not reachable here, for the same reason as CVE-2026-14456: teecryptor is
+# rustls-only and the dep tree has no openssl-sys/native-tls.
+# Revisit: drop this line once deb12 publishes a fixed libssl3, or at once if
+# openssl-sys or native-tls ever enters Cargo.lock.
+CVE-2026-84782
