@@ -427,23 +427,48 @@ impl ChainConfig {
     /// once at boot and fails closed on every problem — a bad URL, an RPC that does
     /// not answer, a revert (an id that was never set, or unset since), or a zero
     /// address — so a chain whose TaskManager cannot be named is never served.
+    ///
+    /// `retries` is how many further attempts follow a transient failure (an RPC
+    /// transport error or a timeout), [`RESOLVE_RETRY_DELAY`] apart. A revert or a
+    /// zero address is a configuration problem that another attempt cannot fix, so
+    /// those are returned at once.
     pub async fn resolve(
         rpc_url: String,
         address_book: Address,
         task_manager_id: u64,
         timeout: Duration,
+        retries: u32,
     ) -> Result<Self, AcpError> {
         let url = rpc_url
             .parse()
             .map_err(|e| AcpError::Misconfigured(format!("rpc_url parse: {e}")))?;
         let provider = ProviderBuilder::new().connect_http(url).erased();
         let book = ICoFHEAddressBook::new(address_book, provider.clone());
-        let call = book.getTm(U256::from(task_manager_id));
-        let fut = call.call();
-        let task_manager = tokio::time::timeout(timeout, fut)
-            .await
-            .map_err(|_| AcpError::Timeout(timeout))?
-            .map_err(|e| map_book_error(address_book, task_manager_id, e))?;
+        let mut attempt = 0u32;
+        let task_manager = loop {
+            let call = book.getTm(U256::from(task_manager_id));
+            let fut = call.call();
+            let result = match tokio::time::timeout(timeout, fut).await {
+                Err(_) => Err(AcpError::Timeout(timeout)),
+                Ok(r) => r.map_err(|e| map_book_error(address_book, task_manager_id, e)),
+            };
+            match result {
+                Ok(address) => break address,
+                Err(e @ (AcpError::Transport(_) | AcpError::Timeout(_))) if attempt < retries => {
+                    attempt += 1;
+                    tracing::warn!(
+                        %address_book,
+                        task_manager_id,
+                        attempt,
+                        retries,
+                        error = %e,
+                        "address book query failed, retrying"
+                    );
+                    tokio::time::sleep(RESOLVE_RETRY_DELAY).await;
+                }
+                Err(e) => return Err(e),
+            }
+        };
         if task_manager == Address::ZERO {
             return Err(AcpError::Misconfigured(format!(
                 "address book {address_book} returned the zero address for TaskManager id {task_manager_id}"
@@ -473,6 +498,9 @@ impl ChainConfig {
     }
 }
 
+/// Pause between attempts of the boot-time address-book query.
+pub const RESOLVE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 /// A chain from `PERMIT_CHAINS_JSON` together with the baked address book and
 /// TaskManager id it resolves through, before that resolution has run.
 #[derive(Debug, Clone)]
@@ -485,6 +513,8 @@ pub struct PendingChain {
     pub address_book: Address,
     /// The id FHE.sol pins for this environment's release, from the baked policy.
     pub task_manager_id: u64,
+    /// Further attempts after a transient failure of the address-book query.
+    pub retries: u32,
 }
 
 /// Top-level verifier config — one [`ChainConfig`] per supported chain,
@@ -516,9 +546,15 @@ impl ChainsVerifierConfig {
     pub async fn resolve(pending: HashMap<u64, PendingChain>) -> Result<Self, (u64, AcpError)> {
         let mut chains = HashMap::with_capacity(pending.len());
         for (chain_id, p) in pending {
-            let cfg = ChainConfig::resolve(p.rpc_url, p.address_book, p.task_manager_id, p.timeout)
-                .await
-                .map_err(|e| (chain_id, e))?;
+            let cfg = ChainConfig::resolve(
+                p.rpc_url,
+                p.address_book,
+                p.task_manager_id,
+                p.timeout,
+                p.retries,
+            )
+            .await
+            .map_err(|e| (chain_id, e))?;
             chains.insert(chain_id, cfg);
         }
         Ok(Self { chains })
@@ -1070,6 +1106,61 @@ mod tests {
         spawn_rpc_with(format!("\"result\":\"{result}\"")).await
     }
 
+    /// A mock JSON-RPC server that answers the first `failures` requests with an
+    /// HTTP 500 and every later one with `payload`; returns the request counter.
+    async fn spawn_flaky_rpc(failures: usize, payload: String) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_srv = requests.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let requests = requests_srv.clone();
+                let payload = payload.clone();
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        let n = match sock.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => n,
+                        };
+                        let seq = requests.fetch_add(1, Ordering::SeqCst);
+                        let text = String::from_utf8_lossy(&buf[..n]);
+                        let id = text
+                            .split("\"id\":")
+                            .nth(1)
+                            .and_then(|s| s.split([',', '}']).next())
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or("1")
+                            .to_string();
+                        let resp = if seq < failures {
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\
+                             Connection: keep-alive\r\n\r\n"
+                                .to_string()
+                        } else {
+                            let json = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},{payload}}}");
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                                json.len(),
+                                json
+                            )
+                        };
+                        if sock.write_all(resp.as_bytes()).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (url, requests)
+    }
+
     /// A mock JSON-RPC server answering every request with `payload` as the
     /// member after `id` — e.g. `"result":"0x.."` or `"error":{...}`.
     async fn spawn_rpc_with(payload: String) -> (String, Arc<AtomicUsize>) {
@@ -1133,7 +1224,7 @@ mod tests {
     async fn resolve_reads_the_task_manager_from_the_book() {
         let tm = address!("00000000000000000000000000000000000000cc");
         let (url, _) = spawn_rpc_with(encoded_address(tm)).await;
-        let cfg = ChainConfig::resolve(url.clone(), TEST_BOOK, 1, Duration::from_secs(5))
+        let cfg = ChainConfig::resolve(url.clone(), TEST_BOOK, 1, Duration::from_secs(5), 0)
             .await
             .expect("resolve");
         assert_eq!(cfg.task_manager, tm);
@@ -1143,7 +1234,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_rejects_a_zero_task_manager() {
         let (url, _) = spawn_rpc_with(encoded_address(Address::ZERO)).await;
-        let err = ChainConfig::resolve(url, TEST_BOOK, 1, Duration::from_secs(5))
+        let err = ChainConfig::resolve(url, TEST_BOOK, 1, Duration::from_secs(5), 0)
             .await
             .unwrap_err();
         assert!(
@@ -1162,7 +1253,7 @@ mod tests {
             "\"error\":{{\"code\":3,\"message\":\"execution reverted\",\"data\":\"0x{data}\"}}"
         ))
         .await;
-        let err = ChainConfig::resolve(url, TEST_BOOK, 7, Duration::from_secs(5))
+        let err = ChainConfig::resolve(url, TEST_BOOK, 7, Duration::from_secs(5), 0)
             .await
             .unwrap_err();
         assert!(
@@ -1177,6 +1268,7 @@ mod tests {
             timeout: Duration::from_secs(5),
             address_book: TEST_BOOK,
             task_manager_id: id,
+            retries: 0,
         }
     }
 
@@ -1218,6 +1310,7 @@ mod tests {
             book,
             1,
             Duration::from_secs(20),
+            2,
         )
         .await
         .expect("resolve against Base Sepolia");
@@ -1226,8 +1319,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_retries_transient_failures_up_to_the_configured_count() {
+        let tm = address!("00000000000000000000000000000000000000cc");
+        let (url, requests) = spawn_flaky_rpc(2, encoded_address(tm)).await;
+        let cfg = ChainConfig::resolve(url, TEST_BOOK, 1, Duration::from_secs(5), 2)
+            .await
+            .expect("third attempt succeeds");
+        assert_eq!(cfg.task_manager, tm);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn resolve_gives_up_after_the_configured_retries() {
+        let (url, requests) = spawn_flaky_rpc(usize::MAX, encoded_address(Address::ZERO)).await;
+        let err = ChainConfig::resolve(url, TEST_BOOK, 1, Duration::from_secs(5), 1)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AcpError::Transport(_)), "got {err:?}");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn resolve_does_not_retry_a_revert() {
+        use alloy::sol_types::SolError;
+        let data = alloy::hex::encode(
+            ICoFHEAddressBook::TaskManagerNotSet { id: U256::from(1) }.abi_encode(),
+        );
+        let (url, requests) = spawn_flaky_rpc(
+            0,
+            format!(
+                "\"error\":{{\"code\":3,\"message\":\"execution reverted\",\"data\":\"0x{data}\"}}"
+            ),
+        )
+        .await;
+        let err = ChainConfig::resolve(url, TEST_BOOK, 1, Duration::from_secs(5), 3)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AcpError::Misconfigured(_)), "got {err:?}");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn resolve_rejects_a_bad_rpc_url() {
-        let err = ChainConfig::resolve("not a url".into(), TEST_BOOK, 1, Duration::from_secs(5))
+        let err = ChainConfig::resolve("not a url".into(), TEST_BOOK, 1, Duration::from_secs(5), 0)
             .await
             .unwrap_err();
         assert!(matches!(err, AcpError::Misconfigured(_)), "got {err:?}");

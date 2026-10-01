@@ -334,19 +334,21 @@ impl Config {
 ///
 /// Format: a JSON object mapping `host_chain_id` (as a string, since JSON
 /// object keys are strings) to per-chain settings — only the API-keyed RPC URL
-/// (+ optional `timeout_ms`). The TaskManager is never carried here: it is
+/// (+ optional `timeout_ms` and `retries`). The TaskManager is never carried here: it is
 /// resolved at boot through the baked address book, by the TaskManager id the
 /// baked policy pins for that chain (`[acl] task_manager_ids`), so an operator
 /// can at most select among TaskManagers the book owner registered.
 ///
 /// ```json
 /// {
-///   "1":      { "rpc_url": "https://eth.llamarpc.com", "timeout_ms": 5000 },
+///   "1":      { "rpc_url": "https://eth.llamarpc.com", "timeout_ms": 5000, "retries": 2 },
 ///   "420105": { "rpc_url": "http://localhost:8545" }
 /// }
 /// ```
 ///
-/// `timeout_ms` is optional (default: 5000). `Ok(None)` is returned if the env
+/// `timeout_ms` is optional (default: 5000), as is `retries` (default: 2): how many
+/// further attempts the boot-time address-book query gets after a transient RPC
+/// failure, one second apart. `Ok(None)` is returned if the env
 /// var is unset or `"{}"`; that's equivalent to "no verifier installed", and
 /// the caller cross-checks against the baked `require_permit` policy. A chain
 /// the policy has no id for is an error naming the chain.
@@ -361,9 +363,14 @@ fn parse_permit_chains(
         rpc_url: String,
         #[serde(default = "default_timeout_ms")]
         timeout_ms: u64,
+        #[serde(default = "default_retries")]
+        retries: u32,
     }
     fn default_timeout_ms() -> u64 {
         5000
+    }
+    fn default_retries() -> u32 {
+        2
     }
 
     let raw = match std::env::var("PERMIT_CHAINS_JSON") {
@@ -395,6 +402,7 @@ fn parse_permit_chains(
                 timeout: Duration::from_millis(entry.timeout_ms),
                 address_book: acl.address_book,
                 task_manager_id,
+                retries: entry.retries,
             },
         );
     }
@@ -1357,7 +1365,7 @@ mod tests {
         std::env::set_var(
             "PERMIT_CHAINS_JSON",
             r#"{
-                "1":      { "rpc_url": "https://eth.example", "timeout_ms": 7000 },
+                "1":      { "rpc_url": "https://eth.example", "timeout_ms": 7000, "retries": 5 },
                 "420105": { "rpc_url": "http://localhost:8545" }
             }"#,
         );
@@ -1372,12 +1380,14 @@ mod tests {
         // The TaskManager is resolved at boot through the baked book, by the baked id.
         assert_eq!(eth.address_book, env_policy::COFHE_ADDRESS_BOOK);
         assert_eq!(eth.task_manager_id, 1);
+        assert_eq!(eth.retries, 5);
 
         let local = pending.get(&420105).expect("chain 420105 present");
         assert_eq!(local.rpc_url, "http://localhost:8545");
-        // timeout default = 5000ms when omitted
+        // timeout default = 5000ms, retries default = 2 when omitted
         assert_eq!(local.timeout, Duration::from_millis(5000));
         assert_eq!(local.task_manager_id, 3);
+        assert_eq!(local.retries, 2);
 
         assert!(!pending.contains_key(&999_999));
     }

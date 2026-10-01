@@ -91,7 +91,7 @@ variable "github_workflow_ref" {
 variable "permit_chains_json" {
   type        = string
   default     = "{}"
-  description = "JSON map of host_chain_id -> { rpc_url, timeout_ms? } the VM uses to reach each chain. The TaskManager is resolved at boot through the baked address book, by the TaskManager id the baked policy pins for that chain; a chain without a baked id refuses to boot. \"{}\" = no verifier installed. Must be non-empty for any env whose baked policy enables the permit gate (the VM refuses to boot otherwise). Example: {\"420105\":{\"rpc_url\":\"https://hostchain-...\"}}."
+  description = "JSON map of host_chain_id -> { rpc_url, timeout_ms?, retries? } the VM uses to reach each chain. The TaskManager is resolved at boot through the baked address book, by the TaskManager id the baked policy pins for that chain (retries = further attempts after a transient RPC failure, default 2); a chain without a baked id refuses to boot. \"{}\" = no verifier installed. Must be non-empty for any env whose baked policy enables the permit gate (the VM refuses to boot otherwise). Example: {\"420105\":{\"rpc_url\":\"https://hostchain-...\"}}."
 }
 
 variable "commitment_registry_rpc_url" {
