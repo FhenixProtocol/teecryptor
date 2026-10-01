@@ -221,11 +221,12 @@ resource "google_compute_instance_template" "teecryptor" {
     # WIP_AUDIENCE / PARTNERS / PUBLIC_BUCKET / PUBLIC_OBJECT here.
     "tee-env-COFHE_ENV" = var.env
     # Permit + commitment gate ENDPOINTS only. The gate switches, Shamir threshold,
-    # commitment version, registry address, warn/enforce mode, AND the permit
-    # TaskManager address are baked per-env into the image (reader / env policy) — no
-    # longer operator-set here. Only the API-keyed RPC endpoints stay env-supplied
-    # (PERMIT_CHAINS_JSON carries just rpc URLs now); a baked policy that enables a gate
-    # but finds its RPC unset makes the VM refuse to boot (fail-closed).
+    # commitment version, registry address, warn/enforce mode, the address book AND
+    # the per-chain TaskManager id are baked per-env into the image (reader / env
+    # policy) — no longer operator-set here. The TaskManager itself is resolved at
+    # boot through the address book. Only the API-keyed RPC endpoints stay
+    # env-supplied (PERMIT_CHAINS_JSON carries just rpc URLs); a baked policy that
+    # enables a gate but finds its RPC unset makes the VM refuse to boot (fail-closed).
     "tee-env-PERMIT_CHAINS_JSON"          = var.permit_chains_json
     "tee-env-COMMITMENT_REGISTRY_RPC_URL" = var.commitment_registry_rpc_url
     },

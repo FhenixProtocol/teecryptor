@@ -141,11 +141,15 @@ passed through to the container:
 ```bash
 make local-run \
   REQUIRE_PERMIT=true \
-  PERMIT_CHAINS_JSON='{"420105":{"rpc_url":"http://hostchain:8547","task_manager":"<addr>"}}'
+  PERMIT_CHAINS_JSON='{"420105":{"rpc_url":"http://hostchain:8547"}}' \
+  ADDRESS_BOOK_ADDRESS=<the local stack's CoFHEAddressBook>
 ```
 
-Chain `420105` runs in-network at `http://hostchain:8547`, and the TaskManager
-address comes from the local deploy. `PERMIT_CHAINS_JSON` is passed only when it
+Chain `420105` runs in-network at `http://hostchain:8547`. The TaskManager is
+resolved once at boot through the address book, `getTm(TASK_MANAGER_ID)` (default
+`1`). Mock builds take the book address from `ADDRESS_BOOK_ADDRESS` because the
+local stack's book is owned by the dev deployer and so sits at a different CREATE2
+address than the canonical one baked into real builds. `PERMIT_CHAINS_JSON` is passed only when it
 is non-empty. Note that `REQUIRE_PERMIT=true` without a valid
 `PERMIT_CHAINS_JSON` is a boot failure by design, not a silent downgrade.
 

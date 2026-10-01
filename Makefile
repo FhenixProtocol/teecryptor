@@ -34,6 +34,10 @@ CT_SOURCE_URL ?= http://ct-server:9450
 REQUIRE_PERMIT                 ?= false
 ENABLE_COMMITMENT_VERIFICATION ?= false
 PERMIT_CHAINS_JSON             ?=
+# Mock-only: the local stack's address book (its owner differs, so does its address)
+# and the TaskManager id resolved through it. Unset = the canonical book, id 1.
+ADDRESS_BOOK_ADDRESS           ?=
+TASK_MANAGER_ID                ?=
 LOCAL_IMAGE   ?= teecryptor:local-mock
 # Host publish port. NOT 8080: cofhe-oz-relayer already publishes host :8080, and
 # this rig runs alongside the cofhe stack. In-network callers use teecryptor:8080
@@ -148,6 +152,8 @@ local-run:
 	  -e REQUIRE_PERMIT="$(REQUIRE_PERMIT)" \
 	  -e ENABLE_COMMITMENT_VERIFICATION="$(ENABLE_COMMITMENT_VERIFICATION)" \
 	  $(if $(PERMIT_CHAINS_JSON),-e PERMIT_CHAINS_JSON='$(PERMIT_CHAINS_JSON)',) \
+	  $(if $(ADDRESS_BOOK_ADDRESS),-e ADDRESS_BOOK_ADDRESS='$(ADDRESS_BOOK_ADDRESS)',) \
+	  $(if $(TASK_MANAGER_ID),-e TASK_MANAGER_ID='$(TASK_MANAGER_ID)',) \
 	  -e RUST_LOG=info \
 	  "$(LOCAL_IMAGE)"
 	@echo "teecryptor up: http://$(LOCAL_NAME):8080 (in-network) | http://localhost:$(LOCAL_PORT) (host)"

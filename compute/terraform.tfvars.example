@@ -26,7 +26,7 @@ caller_cidr   = "35.235.240.0/20"                 # IAP range, so `gcloud comput
 # registry address, and warn/enforce mode are baked per-env into the image — only
 # these API-keyed RPC endpoints are set here. Required for any env whose baked
 # policy enables the gate (else the VM refuses to boot — fail-closed).
-permit_chains_json          = "{\"<CHAIN_ID>\":{\"rpc_url\":\"REPLACE_WITH_HOSTCHAIN_RPC_URL\"}}" # PERMIT_CHAINS_JSON (rpc URL only; the TaskManager address is baked)
+permit_chains_json          = "{\"<CHAIN_ID>\":{\"rpc_url\":\"REPLACE_WITH_HOSTCHAIN_RPC_URL\"}}" # PERMIT_CHAINS_JSON (rpc URL only; the TaskManager is resolved at boot through the baked address book)
 commitment_registry_rpc_url = "REPLACE_WITH_REGISTRY_CHAIN_RPC_URL" # COMMITMENT_REGISTRY_RPC_URL — registry chain JSON-RPC endpoint
 
 # MIG sizing (Phase 1 runs a single instance):
