@@ -24,6 +24,9 @@ before it serves traffic. It impersonates no service account.
 every operator. The stored ciphertexts are public FHE ciphertexts, so they leak
 nothing without the key.
 
+**Trusted, although outside the TEE:** the owner of the CoFHE address book, who
+selects the TaskManager the ACL gate consults. See "Access control" below.
+
 ## How the key is gated
 
 The key never exists whole at rest. It is Shamir-split, one share per **partner
@@ -135,9 +138,21 @@ cannot end up serving open decryption by weakening launch config. The baked
 policy and the split between baked constants and operator-supplied values are
 owned by `src/env_policy.rs`.
 
-The operator supplies only the API-keyed RPC URLs. The **TaskManager contract
-address is baked** — one attested constant, deterministic on every chain and
-environment — so an operator cannot point the gate at a TaskManager they control.
+The operator supplies only the API-keyed RPC URLs. The TaskManager is **not**
+operator input: the **CoFHE address book** — one attested constant, the same CREATE2
+address on every chain — and the **TaskManager id per chain** are baked, and the
+process resolves `getTm(id)` on the book **once at boot**. An operator cannot point
+the gate at a TaskManager they control; at most they select, via the chains map,
+which baked chain to serve.
+
+This makes the **address book owner a trust root**. Whoever owns the book (the
+governance Safe on mainnet) decides which contract answers the ACL questions, via
+`setTm`, and can change the book itself, since it is a UUPS proxy. That is the same
+party that can already upgrade the TaskManager implementation, so no new trust is
+introduced, but it is a trust root and it is named here as one. Resolution is
+boot-only on purpose: a `setTm` is not picked up by a running instance, so a
+TaskManager change takes effect on the next deploy, never silently underneath a
+booted process.
 
 - **Off**: Teecryptor **never** calls the ACL contract. It decrypts whatever
   ct-server returns, gated only by the firewall CIDR. Use this only where the ACL
