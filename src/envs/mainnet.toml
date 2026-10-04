@@ -1,19 +1,20 @@
 # Baked security policy — "mainnet" environment (six key-share holders, threshold 3).
 #
-# The permit gate is ON. The commitment gate is baked ON and ENFORCING (v1,
-# warning_instead_of_enforcement = false), but the CommitmentRegistry contract for
-# mainnet is not deployed yet — registry_address is a "TBD" placeholder. This is
-# deliberately NOT bootable until the real address is filled in AND the (API-keyed)
-# COMMITMENT_REGISTRY_RPC_URL is supplied: with the gate on, boot fail-closes when the
-# RPC is unset, and "TBD" fails address parsing loudly when the RPC is set — so the
-# placeholder can never be deployed by accident. See src/envs/staging.toml for why RPC
-# endpoints stay env-supplied and are never baked into the (publicly-pullable) image.
+# The permit gate is ON. The commitment gate is baked ON and ENFORCING
+# (warning_instead_of_enforcement = false): a decrypt whose handle has no commitment
+# in the registry is refused, so the commitment poster must be live before intake
+# opens. The registry is the CommitmentRegistry on Arbitrum One (chain 42161), a
+# single contract serving both host chains; its default admin is the mainnet Safe and
+# version 2 is the only active version. The (API-keyed) COMMITMENT_REGISTRY_RPC_URL
+# stays env-supplied: with the gate on, boot fail-closes when it is unset. See
+# src/envs/staging.toml for why RPC endpoints are never baked into the
+# (publicly-pullable) image.
 require_permit                 = true
 enable_commitment_verification = true
 
 [commitment]
 version                        = "0x0000000000000000000000000000000000000000000000000000000000000002"
-registry_address               = "TBD"
+registry_address               = "0x4B82F827C03fad5739EFEcfcF743E65E732be695"
 warning_instead_of_enforcement = false
 
 # ACL gate: the TaskManager is resolved at boot through the attested address book as
