@@ -1210,9 +1210,9 @@ mod tests {
     }
 
     /// COFHE_ENV=mainnet resolves the baked source — six key-share holders, threshold 3
-    /// — AND the baked policy: permit ON, commitment baked ON and ENFORCING (v1) with a
-    /// TBD registry address. Mainnet fail-closes at boot until COMMITMENT_REGISTRY_RPC_URL
-    /// is set.
+    /// — AND the baked policy: permit ON, commitment baked ON and ENFORCING against the
+    /// CommitmentRegistry on Arbitrum One. Mainnet fail-closes at boot until
+    /// COMMITMENT_REGISTRY_RPC_URL is set.
     #[cfg(not(feature = "mock"))]
     #[test]
     fn config_env_mainnet_resolves_baked_source_and_policy() {
@@ -1227,8 +1227,8 @@ mod tests {
         );
         assert_eq!(src.shamir_threshold, 3); // must match the keygen var-file's split
 
-        // Policy resolves: permit on, commitment baked ON + ENFORCING (v1), with the
-        // registry address a TBD placeholder until the mainnet contract is deployed.
+        // Policy resolves: permit on, commitment baked ON + ENFORCING, pointing at the
+        // CommitmentRegistry deployed on Arbitrum One.
         let p = env_policy::EnvPolicy::for_env("mainnet").expect("baked mainnet policy");
         assert!(p.require_permit);
         assert!(p.enable_commitment_verification);
@@ -1237,12 +1237,14 @@ mod tests {
             c.version,
             "0x0000000000000000000000000000000000000000000000000000000000000002"
         );
-        assert_eq!(c.registry_address, "TBD");
+        assert_eq!(
+            c.registry_address,
+            "0x4B82F827C03fad5739EFEcfcF743E65E732be695"
+        );
         assert!(!c.warning_instead_of_enforcement);
 
         // Because commitment is baked ON but the registry RPC is env-supplied, a mainnet
-        // boot FAIL-CLOSES until COMMITMENT_REGISTRY_RPC_URL is set — mainnet teecryptor
-        // is intentionally not deployable until the contract is live and the RPC lands.
+        // boot FAIL-CLOSES until COMMITMENT_REGISTRY_RPC_URL is set.
         let _g = EnvGuard::new(KEYS);
         std::env::set_var("COFHE_ENV", "mainnet");
         std::env::set_var("CT_SOURCE_URL", "http://x");

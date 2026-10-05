@@ -475,6 +475,28 @@ mod tests {
         assert!(c.warning_instead_of_enforcement);
     }
 
+    #[test]
+    fn mainnet_policy_is_commitment_enforcing() {
+        let p = EnvPolicy::for_env("mainnet").expect("mainnet policy");
+        assert!(p.require_permit);
+        assert!(p.enable_commitment_verification);
+        let c = p.commitment.expect("mainnet has a [commitment] block");
+        assert_eq!(
+            c.version,
+            "0x0000000000000000000000000000000000000000000000000000000000000002"
+        );
+        // The CommitmentRegistry on Arbitrum One (chain 42161), serving both host chains.
+        assert_eq!(
+            c.registry_address,
+            "0x4B82F827C03fad5739EFEcfcF743E65E732be695"
+        );
+        // Fresh registry, version 2 only: nothing to grandfather, so enforce from day one.
+        assert!(!c.warning_instead_of_enforcement);
+        assert_eq!(p.acl.task_manager_id(1), Some(1));
+        assert_eq!(p.acl.task_manager_id(42161), Some(1));
+        assert_eq!(p.acl.task_manager_id(84532), None);
+    }
+
     /// FAIL-CLOSED: an env with no baked policy is rejected — same posture as the
     /// key-source `lookup`, so the two never drift apart silently.
     #[test]
