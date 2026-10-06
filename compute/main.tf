@@ -175,7 +175,7 @@ resource "google_compute_instance_template" "teecryptor" {
 
   # Confidential VMs cannot live-migrate — host maintenance must TERMINATE.
   # Combined with tee-restart-policy=Never, a maintenance event takes the VM
-  # down until a human relaunches (availability is out of scope, Phase 1).
+  # down; the MIG's auto-healing then recreates it (fresh attestation).
   scheduling {
     on_host_maintenance = "TERMINATE"
   }
@@ -278,11 +278,15 @@ resource "google_compute_instance_group_manager" "teecryptor" {
     max_unavailable_fixed = 0
   }
 
-  # No auto_healing_policies (Phase 1, deferred — availability is out of scope).
-  # Adding it later needs a health check tuned to teecryptor's real cold start
-  # (attestation + key fetch + CT corpus load); too tight an initial_delay_sec
-  # would reap a VM that is merely still booting and turn a hung instance into a
-  # crash loop. Revisit when mig_target_size > 1 and a readiness endpoint exists.
+  # Gates rolls on readiness: /healthz answers 503 until boot completes
+  # (attestation + key fetch), so with max_unavailable=0 the old VM keeps serving
+  # until the new one passes. Without it the MIG counted a VM ready once RUNNING
+  # and the 2026-10-05 roll had ~52 s with no backend. Observed boot ~65 s; 300 s
+  # (as zee-k) is only the grace before a VM that never turns healthy is recreated.
+  auto_healing_policies {
+    health_check      = google_compute_health_check.teecryptor.id
+    initial_delay_sec = 300
+  }
 
   named_port {
     name = "http"

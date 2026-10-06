@@ -100,7 +100,8 @@ deploy:
 	 echo; \
 	 echo "Replace, not stop/start: a Confidential VM's boot image is fixed at creation, so"; \
 	 echo "stop/start returns the SAME instance on the SAME image and reports healthy."; \
-	 echo "This MIG has no autohealing, so verify the new instance booted the intended digest:"; \
+	 echo "The roll waits for /healthz (autohealing). If the new VM never turns healthy"; \
+	 echo "(attestation / key fetch), roll the digest back. Then verify the intended digest:"; \
 	 echo; \
 	 echo "  gcloud compute instances describe <instance> --zone=<zone> --project=<p> \\"; \
 	 echo "    --format='value(metadata.items.filter(\"key:tee-image-reference\").extract(\"value\"))'"; \
