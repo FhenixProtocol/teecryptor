@@ -482,17 +482,21 @@ impl ChainConfig {
         })
     }
 
-    /// Is this chain's RPC answering? `true` only if `eth_blockNumber` returns
-    /// within the configured timeout.
+    /// Can this chain serve a decrypt? `true` only if the TaskManager's
+    /// `getVersion()` view returns within the configured timeout.
     ///
-    /// `eth_blockNumber` on purpose: it is the cheapest call that proves the
-    /// node is both reachable AND synced enough to answer, and it touches no
-    /// contract, so a probe cannot fail for a reason that has nothing to do
-    /// with reachability.
+    /// The probe must reach a real node. A quorum RPC gateway such as dRPC
+    /// answers `eth_blockNumber` and `eth_chainId` itself, so it rejects them
+    /// when the URL asks for a quorum. An `eth_call` goes to the nodes, and it
+    /// is the cheapest method a gateway bills. A constant view returns the
+    /// same answer on every node, so the quorum always agrees. It also takes
+    /// the same path as a decrypt: the RPC, the TaskManager address and its
+    /// ABI. A misconfigured chain therefore shows as unhealthy, not only a
+    /// dead one.
     pub async fn probe(&self) -> bool {
-        use alloy::providers::Provider as _;
+        let contract = ITaskManager::new(self.task_manager, self.provider.clone());
         matches!(
-            tokio::time::timeout(self.timeout, self.provider.get_block_number()).await,
+            tokio::time::timeout(self.timeout, contract.getVersion().call()).await,
             Ok(Ok(_))
         )
     }
@@ -1375,6 +1379,47 @@ mod tests {
         let err =
             ChainConfig::new("not a url".into(), TEST_TM_ADDR, Duration::from_secs(5)).unwrap_err();
         assert!(matches!(err, AcpError::Misconfigured(_)), "got {err:?}");
+    }
+
+    /// The probe must pass against a quorum gateway, which rejects the methods
+    /// it answers itself. The mock answers `eth_call` and rejects
+    /// `eth_blockNumber` and `eth_chainId` the way dRPC does under a quorum.
+    #[tokio::test]
+    async fn probe_passes_on_quorum_gateway() {
+        use wiremock::matchers::{body_partial_json, method};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+        // Not pooled: a pooled server can serve another test that drops it.
+        let server = MockServer::builder().start().await;
+        let reply = |payload: serde_json::Value| {
+            move |req: &Request| {
+                let id = req.body_json::<serde_json::Value>().unwrap()["id"].clone();
+                let mut body = serde_json::json!({ "jsonrpc": "2.0", "id": id });
+                body.as_object_mut()
+                    .unwrap()
+                    .extend(payload.as_object().unwrap().clone());
+                ResponseTemplate::new(200).set_body_json(body)
+            }
+        };
+        Mock::given(method("POST"))
+            .and(body_partial_json(
+                serde_json::json!({ "method": "eth_call" }),
+            ))
+            .respond_with(reply(serde_json::json!({
+                "result": format!("0x{:064x}", 1)
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .respond_with(reply(serde_json::json!({
+                "error": { "code": -32600, "message": "unable to execute with quorum > 1" }
+            })))
+            .mount(&server)
+            .await;
+
+        let cfg = ChainConfig::new(server.uri(), TEST_TM_ADDR, Duration::from_secs(5))
+            .expect("valid rpc_url");
+        assert!(cfg.probe().await);
     }
 
     /// The provider is built once at construction and reused across calls:
