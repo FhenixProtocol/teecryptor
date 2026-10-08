@@ -252,18 +252,15 @@ impl CommitmentConfig {
         self
     }
 
-    /// Is the registry's RPC answering? `true` only if `eth_blockNumber`
-    /// returns within the configured timeout.
+    /// Can the registry serve a commitment lookup? `true` only if
+    /// [`probe_registry`] returns within the configured timeout.
     ///
-    /// The same shape as [`crate::permit::ChainConfig::probe`], and for the
-    /// same reason: prove reachability without depending on a contract call
-    /// that could fail for unrelated reasons.
+    /// A view `eth_call`, for the same reasons as
+    /// [`crate::permit::ChainConfig::probe`]: a quorum RPC gateway rejects
+    /// methods it answers itself, such as `eth_blockNumber`, and a view call
+    /// also catches a wrong registry address or version.
     pub async fn probe(&self) -> bool {
-        use alloy::providers::Provider as _;
-        matches!(
-            tokio::time::timeout(self.timeout, self.contract.provider().get_block_number()).await,
-            Ok(Ok(_))
-        )
+        probe_registry(self).await.is_ok()
     }
 
     /// Whether the gate is in warn-only mode: logs commitment failures but
