@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{MatchedPath, Request, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
@@ -205,8 +206,13 @@ async fn handle_decrypt_v2_submit(
     State(state): State<AppState>,
     Extension(labels): Extension<Arc<DecryptLabels>>,
     headers: HeaderMap,
-    Json(req): Json<DecryptRequest>,
+    body: Result<Json<DecryptRequest>, JsonRejection>,
 ) -> Response {
+    let api = ApiVersion::V2;
+    let Json(req) = match body {
+        Ok(json) => json,
+        Err(rejection) => return api.reject(rejection),
+    };
     let request_id = Uuid::new_v4().to_string();
     let v_format = parse_v_format(&headers);
     let now = chrono::Utc::now().to_rfc3339();
@@ -220,7 +226,7 @@ async fn handle_decrypt_v2_submit(
         req.host_chain_id,
         req.acp.as_ref(),
         &Uuid::parse_str(&request_id).unwrap(),
-        ApiVersion::V2,
+        api,
         &labels,
     )
     .await
@@ -232,6 +238,7 @@ async fn handle_decrypt_v2_submit(
     let decrypted = pt.to_big_endian().to_vec();
 
     let signature = match resolve_signature(
+        api,
         state.inner.signer.as_ref().map(|svc| {
             svc.sign_decrypt(&pt, ty as i32, req.host_chain_id, &req.ct_tempkey, v_format)
         }),
@@ -310,8 +317,13 @@ async fn handle_sealoutput_v2_submit(
     State(state): State<AppState>,
     Extension(labels): Extension<Arc<DecryptLabels>>,
     headers: HeaderMap,
-    Json(req): Json<SealOutputRequest>,
+    body: Result<Json<SealOutputRequest>, JsonRejection>,
 ) -> Response {
+    let api = ApiVersion::V2;
+    let Json(req) = match body {
+        Ok(json) => json,
+        Err(rejection) => return api.reject(rejection),
+    };
     let request_id = Uuid::new_v4().to_string();
     let v_format = parse_v_format(&headers);
     let now = chrono::Utc::now().to_rfc3339();
@@ -322,11 +334,7 @@ async fn handle_sealoutput_v2_submit(
     // sealoutput requires an ACP (the sealingKey must come from somewhere).
     let Some(ref acp) = req.acp else {
         tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealoutput requires an ACP");
-        return err(
-            StatusCode::BAD_REQUEST,
-            "acp_required",
-            Some("sealoutput requires an ACP with a sealingKey".into()),
-        );
+        return api.err(StatusCode::BAD_REQUEST, "acp_required");
     };
 
     let (pt_u256, ty) = match fetch_decrypt(
@@ -335,7 +343,7 @@ async fn handle_sealoutput_v2_submit(
         req.host_chain_id,
         Some(acp),
         &Uuid::parse_str(&request_id).unwrap(),
-        ApiVersion::V2,
+        api,
         &labels,
     )
     .await
@@ -349,11 +357,7 @@ async fn handle_sealoutput_v2_submit(
         Ok(v) => v,
         Err(e) => {
             tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey not hex: {e}");
-            return err(
-                StatusCode::BAD_REQUEST,
-                "acp_malformed",
-                Some(format!("sealingKey hex: {e}")),
-            );
+            return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
     };
 
@@ -363,27 +367,20 @@ async fn handle_sealoutput_v2_submit(
         Ok(s) => s,
         Err(SealError::BadKeyLength(n)) => {
             tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey wrong length: {n} bytes");
-            return err(
-                StatusCode::BAD_REQUEST,
-                "acp_malformed",
-                Some(format!("sealingKey must be 32 bytes, got {n}")),
-            );
+            return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
         Err(SealError::DegenerateKey) => {
             tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey is degenerate");
-            return err(
-                StatusCode::BAD_REQUEST,
-                "acp_malformed",
-                Some("sealingKey is the all-zero / degenerate Curve25519 point".into()),
-            );
+            return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
         Err(SealError::EncryptFailed(e)) => {
             tracing::error!(%request_id, ct_tempkey = %req.ct_tempkey, "seal (crypto_box) failed: {e}");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "seal_failed", None);
+            return api.err(StatusCode::INTERNAL_SERVER_ERROR, "seal_failed");
         }
     };
 
     let signature = match resolve_signature(
+        api,
         state.inner.signer.as_ref().map(|svc| {
             svc.sign_sealoutput(
                 &sealed_result.data,
@@ -531,11 +528,8 @@ async fn handle_metrics(State(state): State<AppState>) -> Response {
             .into_response(),
         // Push mode has no registry (and an encoder failure logs, then lands
         // here too): there is no exposition to serve, honestly a 503.
-        None => err(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no_scrape_surface",
-            Some("metrics are pushed over OTLP; no text exposition exists".to_string()),
-        ),
+        // The metrics port has no API generation; v2 is the bare `{ error }` shape.
+        None => ApiVersion::V2.err(StatusCode::SERVICE_UNAVAILABLE, "no_scrape_surface"),
     }
 }
 
@@ -568,7 +562,7 @@ async fn track_metrics(State(state): State<AppState>, mut req: Request, next: Ne
     metrics.observe_http(route, &method, resp.status(), elapsed);
     if let Some(route) = route.filter(|r| DECRYPT_ROUTES.contains(r)) {
         // `Outcome` is absent exactly when no API funnel produced the response:
-        // a success, or a request axum rejected before the handler ran.
+        // a success, or an unmatched route / wrong method axum answered itself.
         metrics.observe_decrypt(
             route,
             &labels,
@@ -811,8 +805,9 @@ fn log_op_success(
     );
 }
 
-/// Which API generation a request arrived on. Only affects how retryable
-/// conditions are encoded — see [`ApiVersion::retryable`].
+/// Which API generation a request arrived on. It decides how a retryable
+/// condition is encoded ([`ApiVersion::retryable`]) and the shape of the error
+/// body ([`ApiVersion::err`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ApiVersion {
     V1,
@@ -828,38 +823,55 @@ impl ApiVersion {
     ///
     /// v1 → status + JSON body. Old v1 clients have no retry loop and can't
     /// survive an empty body (`204` is 2xx, so they parse it and die), but they
-    /// do read `error_message`; the per-reason status and detail live on
-    /// [`RetryReason`].
+    /// do read `error_message`; the per-reason status lives on [`RetryReason`].
     fn retryable(self, reason: RetryReason) -> Response {
         match self {
             ApiVersion::V2 => retryable_204(reason),
-            ApiVersion::V1 => err(
-                reason.v1_status(),
-                reason.as_str(),
-                Some(reason.v1_details().to_string()),
-            ),
+            ApiVersion::V1 => self.err(reason.v1_status(), reason.as_str()),
         }
     }
-}
 
-fn err(status: StatusCode, error: &'static str, details: Option<String>) -> Response {
-    // Mirror cofhe's dispatcher: clients read `error_message`. Keep our stable
-    // machine `error` code alongside it, and fall back to that code when there's
-    // no extra detail so the field is never empty.
-    let error_message = details.unwrap_or_else(|| error.to_string());
-    let mut resp = (
-        status,
-        Json(ErrorResponse {
-            error,
-            error_message,
-        }),
-    )
-        .into_response();
-    // Every error in the API leaves through this funnel, so labeling it here
-    // labels them all — the metric's `outcome` vocabulary is exactly the error
-    // codes clients receive. Extensions never reach the wire.
-    resp.extensions_mut().insert(Outcome::new(error));
-    resp
+    /// Encode a terminal error: `status` plus a JSON body that carries the
+    /// stable error `code` and nothing else.
+    ///
+    /// v2 → `{ "error": code }`. The dispatcher's v2 routes answer an error
+    /// with the status alone; the code is kept so a client can tell the 401s
+    /// (`acp_denied`, `acp_expired`, `acp_invalid`) apart.
+    ///
+    /// v1 → `{ "error": code, "error_message": code }`. Old v1 clients surface
+    /// `error_message` to their caller, so the key stays. The code is the whole
+    /// message: internal detail belongs in the server log, not on the wire, and
+    /// the signature takes no free text so no detail can travel.
+    fn err(self, status: StatusCode, code: &'static str) -> Response {
+        let mut resp = (
+            status,
+            Json(ErrorResponse {
+                error: code,
+                error_message: (self == ApiVersion::V1).then_some(code),
+            }),
+        )
+            .into_response();
+        // Every error in the API leaves through this funnel, so labeling it here
+        // labels them all — the metric's `outcome` vocabulary is exactly the error
+        // codes clients receive. Extensions never reach the wire.
+        resp.extensions_mut().insert(Outcome::new(code));
+        resp
+    }
+
+    /// Encode a request body axum refused before the handler ran. The status is
+    /// axum's own (400 malformed JSON, 415 wrong content type, 422 wrong
+    /// shape); the body follows [`ApiVersion::err`], so the serde message,
+    /// which names fields and byte offsets, stays in the log. The code is the
+    /// metric's existing `rejected` label, so the outcome vocabulary is
+    /// unchanged.
+    fn reject(self, rejection: JsonRejection) -> Response {
+        tracing::info!(
+            status = %rejection.status(),
+            "request body rejected: {}",
+            rejection.body_text()
+        );
+        self.err(rejection.status(), "rejected")
+    }
 }
 
 /// Resolve the `signature` field for a response.
@@ -873,6 +885,7 @@ fn err(status: StatusCode, error: &'static str, details: Option<String>) -> Resp
 // Err is an axum Response; same shape fetch_decrypt uses.
 #[allow(clippy::result_large_err)]
 fn resolve_signature<E: std::fmt::Display>(
+    api: ApiVersion,
     signed: Option<Result<String, E>>,
     request_id: &str,
 ) -> Result<String, Response> {
@@ -881,11 +894,7 @@ fn resolve_signature<E: std::fmt::Display>(
         Some(Ok(sig)) => Ok(sig),
         Some(Err(e)) => {
             tracing::error!(%request_id, "signing failed: {e}");
-            Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "signing_failed",
-                None,
-            ))
+            Err(api.err(StatusCode::INTERNAL_SERVER_ERROR, "signing_failed"))
         }
     }
 }
@@ -910,24 +919,16 @@ fn parse_v_format(headers: &HeaderMap) -> SignatureVFormat {
 // idiom (see `fetch_decrypt`); boxing it here just for this sync helper would
 // be inconsistent with the rest of the module.
 #[allow(clippy::result_large_err)]
-fn handle_to_u256(handle: &str, request_id: &Uuid) -> Result<U256, Response> {
+fn handle_to_u256(api: ApiVersion, handle: &str, request_id: &Uuid) -> Result<U256, Response> {
     let handle_hex = handle.strip_prefix("0x").unwrap_or(handle);
     if handle_hex.len() > 64 {
         tracing::info!(%request_id, ct_tempkey = %handle, "handle exceeds 32 bytes (not a U256)");
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            Some("handle exceeds 32 bytes (cannot be a U256)".into()),
-        ));
+        return Err(api.err(StatusCode::BAD_REQUEST, "bad_request"));
     }
     let padded = format!("{handle_hex:0>64}");
     U256::from_str_radix(&padded, 16).map_err(|_| {
         tracing::info!(%request_id, ct_tempkey = %handle, "handle not parseable as U256");
-        err(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            Some("handle is not parseable as U256".into()),
-        )
+        api.err(StatusCode::BAD_REQUEST, "bad_request")
     })
 }
 
@@ -966,15 +967,6 @@ impl RetryReason {
             }
         }
     }
-
-    /// Human-readable `error_message` for the v1 JSON body (old clients surface it).
-    fn v1_details(self) -> &'static str {
-        match self {
-            RetryReason::Overloaded => "server is at its in-flight capacity; retry shortly",
-            RetryReason::CtNotReady => "CT not ready",
-            RetryReason::CommitmentPending => "commitment not yet posted on-chain; retry shortly",
-        }
-    }
 }
 
 /// Response-header name explaining why a `204` is retryable. Exposed via CORS
@@ -1008,6 +1000,7 @@ async fn enforce_acp(
     host_chain_id: u64,
     acp: Option<&AcpData>,
     request_id: &Uuid,
+    api: ApiVersion,
 ) -> Option<Response> {
     // ACP present -> isAllowedWithPermission. No ACP -> isPubliclyAllowed
     // (the public-decrypt path). Denial maps to 401 for a presented-but-rejected
@@ -1053,39 +1046,31 @@ async fn enforce_acp(
                     "acp denied: handle not publicly decryptable (isPubliclyAllowed=false)"
                 ),
             }
-            Some(err(denied.0, denied.1, None))
+            Some(api.err(denied.0, denied.1))
         }
         Err(e @ AcpError::UnknownChain(_)) => {
             tracing::info!(%request_id, ct_tempkey = %handle, "acp rejected: {e}");
-            Some(err(
-                StatusCode::BAD_REQUEST,
-                "unknown_chain",
-                Some(format!("host_chain_id {host_chain_id} is not configured")),
-            ))
+            Some(api.err(StatusCode::BAD_REQUEST, "unknown_chain"))
         }
         Err(e @ AcpError::Expired) => {
             tracing::info!(%request_id, ct_tempkey = %handle, "acp rejected: {e}");
-            Some(err(StatusCode::UNAUTHORIZED, "acp_expired", None))
+            Some(api.err(StatusCode::UNAUTHORIZED, "acp_expired"))
         }
         Err(e @ AcpError::BadSignature) => {
             tracing::info!(%request_id, ct_tempkey = %handle, "acp rejected: {e}");
-            Some(err(StatusCode::UNAUTHORIZED, "acp_invalid", None))
+            Some(api.err(StatusCode::UNAUTHORIZED, "acp_invalid"))
         }
         Err(e @ AcpError::Malformed(_)) => {
             tracing::info!(%request_id, ct_tempkey = %handle, "acp rejected: {e}");
-            Some(err(StatusCode::BAD_REQUEST, "acp_malformed", None))
+            Some(api.err(StatusCode::BAD_REQUEST, "acp_malformed"))
         }
         Err(e @ AcpError::Timeout(_)) => {
             tracing::warn!(%request_id, ct_tempkey = %handle, "acp verifier timeout: {e}");
-            Some(err(
-                StatusCode::GATEWAY_TIMEOUT,
-                "acp_verifier_timeout",
-                None,
-            ))
+            Some(api.err(StatusCode::GATEWAY_TIMEOUT, "acp_verifier_timeout"))
         }
         Err(e @ (AcpError::Transport(_) | AcpError::Misconfigured(_))) => {
             tracing::warn!(%request_id, ct_tempkey = %handle, "acp verifier error: {e}");
-            Some(err(StatusCode::BAD_GATEWAY, "acp_verifier_error", None))
+            Some(api.err(StatusCode::BAD_GATEWAY, "acp_verifier_error"))
         }
     }
 }
@@ -1156,11 +1141,7 @@ async fn enforce_commitment(
                 reason = "timeout",
                 "commitment verifier timeout: {e}"
             );
-            Err(err(
-                StatusCode::GATEWAY_TIMEOUT,
-                "commitment_verifier_timeout",
-                None,
-            ))
+            Err(api.err(StatusCode::GATEWAY_TIMEOUT, "commitment_verifier_timeout"))
         }
         Err(e @ (CommitmentError::Transport(_) | CommitmentError::Misconfigured(_))) => {
             if cfg.warn_only() {
@@ -1179,11 +1160,7 @@ async fn enforce_commitment(
                 reason = "transport",
                 "commitment verifier error: {e}"
             );
-            Err(err(
-                StatusCode::BAD_GATEWAY,
-                "commitment_verifier_error",
-                None,
-            ))
+            Err(api.err(StatusCode::BAD_GATEWAY, "commitment_verifier_error"))
         }
     }
 }
@@ -1307,7 +1284,7 @@ async fn enforce_commitment_integrity(
         actual = %actual,
         "on-chain commitment does not match fetched ciphertext bytes; refusing to decrypt"
     );
-    Err(err(StatusCode::BAD_GATEWAY, "commitment_mismatch", None))
+    Err(api.err(StatusCode::BAD_GATEWAY, "commitment_mismatch"))
 }
 
 fn valid_handle(h: &str) -> bool {
@@ -1355,11 +1332,7 @@ async fn fetch_decrypt(
 
     if !valid_handle(ct_tempkey) {
         tracing::info!(%request_id, ct_tempkey = %ct_tempkey, "invalid handle (not hex)");
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "bad_request",
-            Some("handle must be non-empty hex".into()),
-        ));
+        return Err(api.err(StatusCode::BAD_REQUEST, "bad_request"));
     }
 
     // Auth/eligibility gates. The ACP (ACL) check and the commitment check
@@ -1380,7 +1353,7 @@ async fn fetch_decrypt(
     // Parse the handle to a U256 once; the ACP/commitment gates and the
     // type/zone cross-check below all read from it (`handle_to_u256` is pure, so
     // this is the single conversion per request).
-    let handle_u256 = match handle_to_u256(ct_tempkey, request_id) {
+    let handle_u256 = match handle_to_u256(api, ct_tempkey, request_id) {
         Ok(v) => v,
         Err(resp) => return Err(resp),
     };
@@ -1396,7 +1369,16 @@ async fn fetch_decrypt(
         let acp_fut = async {
             match state.acp_verifier() {
                 Some(cfg) => {
-                    enforce_acp(cfg, handle_u256, ct_tempkey, host_chain_id, acp, request_id).await
+                    enforce_acp(
+                        cfg,
+                        handle_u256,
+                        ct_tempkey,
+                        host_chain_id,
+                        acp,
+                        request_id,
+                        api,
+                    )
+                    .await
                 }
                 None => None,
             }
@@ -1429,7 +1411,7 @@ async fn fetch_decrypt(
         Ok(ct) => ct,
         Err(CtFetchError::NotFound) => {
             tracing::info!(%request_id, ct_tempkey = %ct_tempkey, "ciphertext not found");
-            return Err(err(StatusCode::NOT_FOUND, "ct_not_found", None));
+            return Err(api.err(StatusCode::NOT_FOUND, "ct_not_found"));
         }
         // "ct not ready" is the normal transient state for a freshly-computed
         // handle (available once the engine finishes and its commitment is
@@ -1442,20 +1424,19 @@ async fn fetch_decrypt(
         }
         Err(CtFetchError::Timeout) => {
             tracing::warn!(%request_id, ct_tempkey = %ct_tempkey, "ct-source timeout");
-            return Err(err(StatusCode::GATEWAY_TIMEOUT, "ct_source_timeout", None));
+            return Err(api.err(StatusCode::GATEWAY_TIMEOUT, "ct_source_timeout"));
         }
         Err(e) => {
             tracing::warn!(%request_id, ct_tempkey = %ct_tempkey, "ct-source error: {e}");
-            return Err(err(StatusCode::BAD_GATEWAY, "ct_source_error", None));
+            return Err(api.err(StatusCode::BAD_GATEWAY, "ct_source_error"));
         }
     };
 
     if ct.security_zone != 0 {
         tracing::warn!(%request_id, ct_tempkey = %ct_tempkey, "unsupported security zone {}", ct.security_zone);
-        return Err(err(
+        return Err(api.err(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported_security_zone",
-            Some(format!("got {}, only 0 supported", ct.security_zone)),
         ));
     }
 
@@ -1475,7 +1456,7 @@ async fn fetch_decrypt(
             gzipped = ct.gzipped,
             "ct-server served a non-compressed ciphertext; rejecting"
         );
-        return Err(err(StatusCode::BAD_GATEWAY, "ct_source_error", None));
+        return Err(api.err(StatusCode::BAD_GATEWAY, "ct_source_error"));
     }
 
     // Commitment INTEGRITY check (see `enforce_commitment_integrity`): the bytes
@@ -1503,10 +1484,9 @@ async fn fetch_decrypt(
     // closure below (a borrow of state can't cross into a 'static spawn_blocking).
     if state.inner.keys.client_key(ct.security_zone).is_none() {
         tracing::warn!(%request_id, ct_tempkey = %ct_tempkey, "unsupported security zone {}", ct.security_zone);
-        return Err(err(
+        return Err(api.err(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported_security_zone",
-            Some(format!("got {}, only 0 supported", ct.security_zone)),
         ));
     }
 
@@ -1514,11 +1494,7 @@ async fn fetch_decrypt(
         Ok(t) => t,
         Err(_) => {
             tracing::warn!(%request_id, ct_tempkey = %ct_tempkey, "unsupported encryption type {}", ct.encryption_type);
-            return Err(err(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "unsupported_type",
-                Some(format!("encryption_type {}", ct.encryption_type)),
-            ));
+            return Err(api.err(StatusCode::UNPROCESSABLE_ENTITY, "unsupported_type"));
         }
     };
 
@@ -1540,7 +1516,7 @@ async fn fetch_decrypt(
             declared = ct.encryption_type,
             "ct-server type disagrees with the handle's committed type byte; refusing to decrypt"
         );
-        return Err(err(StatusCode::BAD_GATEWAY, "ct_type_mismatch", None));
+        return Err(api.err(StatusCode::BAD_GATEWAY, "ct_type_mismatch"));
     }
     let handle_zone = crate::cofhe_layout::handle_zone(&handle_bytes) as i32;
     if handle_zone != ct.security_zone {
@@ -1552,7 +1528,7 @@ async fn fetch_decrypt(
             declared = ct.security_zone,
             "ct-server zone disagrees with the handle's committed zone byte; refusing to decrypt"
         );
-        return Err(err(StatusCode::BAD_GATEWAY, "ct_zone_mismatch", None));
+        return Err(api.err(StatusCode::BAD_GATEWAY, "ct_zone_mismatch"));
     }
 
     // Both metadata gates passed, so the width is now a verified fact and can
@@ -1602,15 +1578,11 @@ async fn fetch_decrypt(
             // safe_deserialize error on bytes ct-server returned — an upstream
             // payload (502) condition, not an internal fault. No detail leaked.
             tracing::warn!(%request_id, ct_tempkey = %ct_tempkey, "decrypt failed (bad ct payload): {e}");
-            Err(err(StatusCode::BAD_GATEWAY, "ct_source_error", None))
+            Err(api.err(StatusCode::BAD_GATEWAY, "ct_source_error"))
         }
         Err(join_err) => {
             tracing::error!(%request_id, ct_tempkey = %ct_tempkey, "decrypt task panicked: {join_err}");
-            Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                None,
-            ))
+            Err(api.err(StatusCode::INTERNAL_SERVER_ERROR, "internal_error"))
         }
     }
 }
@@ -1619,8 +1591,13 @@ async fn handle_decrypt(
     State(state): State<AppState>,
     Extension(labels): Extension<Arc<DecryptLabels>>,
     headers: HeaderMap,
-    Json(req): Json<DecryptRequest>,
+    body: Result<Json<DecryptRequest>, JsonRejection>,
 ) -> Response {
+    let api = ApiVersion::V1;
+    let Json(req) = match body {
+        Ok(json) => json,
+        Err(rejection) => return api.reject(rejection),
+    };
     let request_id = Uuid::new_v4();
     let v_format = parse_v_format(&headers);
     let started = Instant::now();
@@ -1633,7 +1610,7 @@ async fn handle_decrypt(
         req.host_chain_id,
         req.acp.as_ref(),
         &request_id,
-        ApiVersion::V1,
+        api,
         &labels,
     )
     .await
@@ -1646,6 +1623,7 @@ async fn handle_decrypt(
     let decrypted = pt.to_big_endian().to_vec();
 
     let signature = match resolve_signature(
+        api,
         state.inner.signer.as_ref().map(|svc| {
             svc.sign_decrypt(&pt, ty as i32, req.host_chain_id, &req.ct_tempkey, v_format)
         }),
@@ -1680,8 +1658,13 @@ async fn handle_sealoutput(
     State(state): State<AppState>,
     Extension(labels): Extension<Arc<DecryptLabels>>,
     headers: HeaderMap,
-    Json(req): Json<SealOutputRequest>,
+    body: Result<Json<SealOutputRequest>, JsonRejection>,
 ) -> Response {
+    let api = ApiVersion::V1;
+    let Json(req) = match body {
+        Ok(json) => json,
+        Err(rejection) => return api.reject(rejection),
+    };
     let request_id = Uuid::new_v4();
     let v_format = parse_v_format(&headers);
     let started = Instant::now();
@@ -1691,11 +1674,7 @@ async fn handle_sealoutput(
     // sealoutput requires an ACP (the sealingKey must come from somewhere).
     let Some(ref acp) = req.acp else {
         tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealoutput requires an ACP");
-        return err(
-            StatusCode::BAD_REQUEST,
-            "acp_required",
-            Some("sealoutput requires an ACP with a sealingKey".into()),
-        );
+        return api.err(StatusCode::BAD_REQUEST, "acp_required");
     };
 
     let (pt_u256, ty) = match fetch_decrypt(
@@ -1704,7 +1683,7 @@ async fn handle_sealoutput(
         req.host_chain_id,
         Some(acp),
         &request_id,
-        ApiVersion::V1,
+        api,
         &labels,
     )
     .await
@@ -1720,11 +1699,7 @@ async fn handle_sealoutput(
         Ok(v) => v,
         Err(e) => {
             tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey not hex: {e}");
-            return err(
-                StatusCode::BAD_REQUEST,
-                "acp_malformed",
-                Some(format!("sealingKey hex: {e}")),
-            );
+            return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
     };
 
@@ -1738,27 +1713,20 @@ async fn handle_sealoutput(
         Ok(s) => s,
         Err(SealError::BadKeyLength(n)) => {
             tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey wrong length: {n} bytes");
-            return err(
-                StatusCode::BAD_REQUEST,
-                "acp_malformed",
-                Some(format!("sealingKey must be 32 bytes, got {n}")),
-            );
+            return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
         Err(SealError::DegenerateKey) => {
             tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey is degenerate");
-            return err(
-                StatusCode::BAD_REQUEST,
-                "acp_malformed",
-                Some("sealingKey is the all-zero / degenerate Curve25519 point".into()),
-            );
+            return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
         Err(SealError::EncryptFailed(e)) => {
             tracing::error!(%request_id, ct_tempkey = %req.ct_tempkey, "seal (crypto_box) failed: {e}");
-            return err(StatusCode::INTERNAL_SERVER_ERROR, "seal_failed", None);
+            return api.err(StatusCode::INTERNAL_SERVER_ERROR, "seal_failed");
         }
     };
 
     let signature = match resolve_signature(
+        api,
         state.inner.signer.as_ref().map(|svc| {
             svc.sign_sealoutput(
                 &sealed_result.data,
@@ -2343,8 +2311,11 @@ mod tests {
             .unwrap();
         assert_eq!(r3.status().as_u16(), 503, "v1 overflow must shed with 503");
         let b3: serde_json::Value = r3.json().await.expect("v1 shed must return a JSON body");
-        assert_eq!(b3["error"], "overloaded");
-        assert!(b3["error_message"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(
+            b3,
+            serde_json::json!({ "error": "overloaded", "error_message": "overloaded" }),
+            "v1 clients surface error_message"
+        );
 
         // #1 still succeeds once ct-source responds.
         assert_eq!(r1.await.unwrap().as_u16(), 200);
@@ -2597,6 +2568,71 @@ mod tests {
         }
     }
 
+    /// The error body carries the stable code and nothing else. v2 answers
+    /// `{ error }`: the dispatcher's status-only v2 error plus the code. v1
+    /// repeats the code as `error_message`, the key old v1 clients surface.
+    #[tokio::test]
+    async fn error_body_carries_the_code_only() {
+        let state = AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None);
+        state.set_ready();
+        let base = spawn(state).await;
+        let client = reqwest::Client::new();
+        // A non-hex handle fails validation before any upstream call.
+        let body = serde_json::json!({ "ct_tempkey": "zz", "host_chain_id": TEST_CHAIN_ID });
+
+        for (route, expected) in [
+            (
+                "/decrypt",
+                serde_json::json!({ "error": "bad_request", "error_message": "bad_request" }),
+            ),
+            ("/v2/decrypt", serde_json::json!({ "error": "bad_request" })),
+        ] {
+            let r = client
+                .post(format!("{base}{route}"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 400, "{route}");
+            let got: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(got, expected, "{route}");
+        }
+    }
+
+    /// A body axum refuses gets the same versioned error shape as every other
+    /// error, under the code `rejected`, with axum's own status: 422 for a
+    /// missing field, 400 for malformed JSON. The serde message names fields
+    /// and byte offsets; it belongs in the log.
+    #[tokio::test]
+    async fn refused_body_gets_the_versioned_error_shape() {
+        let state = AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None);
+        state.set_ready();
+        let base = spawn(state).await;
+        let client = reqwest::Client::new();
+        let no_chain = serde_json::json!({ "ct_tempkey": typed_handle(4) }).to_string();
+        let v1 = serde_json::json!({ "error": "rejected", "error_message": "rejected" });
+        let v2 = serde_json::json!({ "error": "rejected" });
+
+        for (route, body, status, expected) in [
+            ("/decrypt", no_chain.as_str(), 422, &v1),
+            ("/sealoutput", no_chain.as_str(), 422, &v1),
+            ("/v2/decrypt", no_chain.as_str(), 422, &v2),
+            ("/v2/sealoutput", no_chain.as_str(), 422, &v2),
+            ("/v2/decrypt", "{ not json", 400, &v2),
+        ] {
+            let r = client
+                .post(format!("{base}{route}"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(body.to_owned())
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(r.status(), status, "{route}: {body}");
+            let got: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(&got, expected, "{route}: {body}");
+        }
+    }
+
     #[tokio::test]
     async fn v1_ct_not_ready_is_428_with_json_body() {
         // v1 must NOT get the bodyless 204: tnDecryptV1 treats 204 as ok (it's 2xx)
@@ -2612,10 +2648,10 @@ mod tests {
                 .json()
                 .await
                 .unwrap_or_else(|e| panic!("{route}: v1 must return a JSON body: {e}"));
-            assert_eq!(b["error"], "ct_not_ready", "{route}");
-            assert!(
-                b["error_message"].as_str().is_some_and(|s| !s.is_empty()),
-                "{route}: old v1 clients read error_message; got {b}"
+            assert_eq!(
+                b,
+                serde_json::json!({ "error": "ct_not_ready", "error_message": "ct_not_ready" }),
+                "{route}: old v1 clients read error_message"
             );
         }
     }
@@ -3006,12 +3042,11 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 400);
         let body: serde_json::Value = r.json().await.unwrap();
-        assert_eq!(body["error"], "unknown_chain");
-        // Dispatcher-compat: the human reason is also carried in `error_message`.
-        assert!(body["error_message"]
-            .as_str()
-            .unwrap()
-            .contains("host_chain_id"));
+        assert_eq!(
+            body,
+            serde_json::json!({ "error": "unknown_chain", "error_message": "unknown_chain" }),
+            "the configured chain set is internal; the body carries the code only"
+        );
     }
 
     // -------- /sealoutput --------------------------------------------------
@@ -3828,9 +3863,9 @@ mod tests {
         );
     }
 
-    /// A body axum itself refuses never reaches the error funnel, so it has no
-    /// error code — it is still counted, as `outcome="rejected"` with nothing
-    /// the request never established.
+    /// A body axum itself refuses reaches the funnel through
+    /// `ApiVersion::reject`, so it is counted as `outcome="rejected"` with
+    /// nothing the request never established.
     #[tokio::test]
     async fn metrics_decrypt_outcome_rejected_for_a_refused_body() {
         let state = AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None);

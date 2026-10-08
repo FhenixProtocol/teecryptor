@@ -54,6 +54,8 @@ verifies on-chain. The exact bytes that are signed are built in `src/signing/`
 
 ## Errors
 
-A failure returns a status code and a short reason. Some are retryable and some
-are terminal. The codes and how they map to HTTP are in `src/error.rs` and
-`src/http.rs`.
+A failure returns a status code and a JSON body that carries the stable error
+code and nothing else. v2 returns `{ "error": "<code>" }`. v1 also repeats the
+code as `error_message`, the key old v1 clients surface. Internal detail stays
+in the server log. Some codes are retryable and some are terminal. The codes
+and how they map to HTTP are in `src/error.rs` and `src/http.rs`.
