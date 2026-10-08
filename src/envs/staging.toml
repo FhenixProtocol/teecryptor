@@ -12,6 +12,10 @@
 require_permit                 = true
 enable_commitment_verification = true
 
+# No OTLP push: staging serves only the :9090 exposition and sends nothing to
+# the Telemetry API. Written out (it is also the default) so the policy shows it.
+metrics_push = false
+
 # Present because the commitment gate is on. registry_address is the public
 # CommitmentRegistry contract; the (API-keyed) RPC URL stays env-supplied.
 # warning_instead_of_enforcement = run the gate but log-and-allow on failure (rollout mode).

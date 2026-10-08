@@ -49,6 +49,11 @@ pub struct EnvPolicy {
     /// (API-keyed); only the public address/version/avoid-enforcement are baked.
     #[serde(default)]
     pub commitment: Option<CommitmentPolicy>,
+    /// OTLP push of metrics to the compiled-in Telemetry endpoint. Defaults to
+    /// off; an env opts in with `metrics_push = true`. Baked rather than an env
+    /// var so an operator cannot toggle monitoring on an attested image.
+    #[serde(default)]
+    pub metrics_push: bool,
     /// ACL-gate detail: which TaskManager id each served chain resolves through the
     /// address book. Always present — every baked env runs the permit gate.
     pub acl: AclPolicy,
@@ -213,6 +218,8 @@ impl EnvPolicy {
             require_permit: flag("REQUIRE_PERMIT", "true")?,
             enable_commitment_verification,
             commitment,
+            // Mock builds never push (no VM identity); the value is unused there.
+            metrics_push: false,
             acl: AclPolicy {
                 address_book,
                 task_manager_ids: BTreeMap::new(),
@@ -453,6 +460,13 @@ mod tests {
             "0x8045cb9b8b179139181b5d6129D1556B7a5a4C48"
         );
         assert!(c.warning_instead_of_enforcement);
+        assert!(!p.metrics_push);
+    }
+
+    #[test]
+    fn metrics_push_is_baked_on() {
+        assert!(EnvPolicy::for_env("testnet").unwrap().metrics_push);
+        assert!(EnvPolicy::for_env("mainnet").unwrap().metrics_push);
     }
 
     #[test]
