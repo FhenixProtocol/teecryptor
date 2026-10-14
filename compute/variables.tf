@@ -39,7 +39,51 @@ variable "image_reference" {
 # --- Runtime config -----------------------------------------------------
 variable "ct_source_url" {
   type        = string
-  description = "Base URL of the ct-server /GetCT source the VM calls, e.g. http://ct-stub:9450. For the first-boot real-decrypt test this is the corpus-serving stub in this VPC."
+  default     = ""
+  description = "Base URL of the ct-server /GetStoredCt source the VM calls, e.g. http://ct-stub:9450. For the first-boot real-decrypt test this is the corpus-serving stub in this VPC. Leave empty when enable_ct_server_psc = true: the VM then calls the PSC endpoint."
+}
+
+# --- Private path to the GKE ct-server read listener (PSC) -------------------
+variable "enable_ct_server_psc" {
+  type        = bool
+  default     = false
+  description = "When true, Terraform creates a PSC path from this VPC to ct-server's read listener in GKE (NAT subnet + service attachment in the GKE VPC, endpoint in this VPC) and points CT_SOURCE_URL at it. The GKE cluster must run in compute_project_id."
+}
+
+variable "gke_network" {
+  type        = string
+  default     = ""
+  description = "Name of the GKE VPC network. The PSC NAT subnet is created there. Required when enable_ct_server_psc = true."
+}
+
+variable "ct_server_read_forwarding_rule" {
+  type        = string
+  default     = ""
+  description = "Name of the internal LB forwarding rule created by the ct-server-ct-server-read-ilb k8s Service. Required when enable_ct_server_psc = true. Find it with: gcloud compute forwarding-rules list --regions=<psc_region> --project=<project> | grep <the Service's EXTERNAL-IP>"
+}
+
+variable "ct_server_read_port" {
+  type        = number
+  default     = 9450
+  description = "Port of ct-server's read listener (/GetStoredCt, /Health) on the read ILB."
+}
+
+variable "psc_region" {
+  type        = string
+  default     = ""
+  description = "Region for the PSC resources. Must match the GKE cluster region. Defaults to var.region when empty."
+}
+
+variable "psc_nat_subnet_cidr" {
+  type        = string
+  default     = "10.0.128.8/29"
+  description = "CIDR for the PSC NAT subnet created in the GKE VPC. Must not overlap existing subnets there; zee-k-verifier's ct-server-psc-nat already holds 10.0.128.0/29."
+}
+
+variable "psc_consumer_subnet_cidr" {
+  type        = string
+  default     = "10.0.2.0/29"
+  description = "CIDR for the PSC consumer subnet created in this VPC in psc_region. Must not overlap var.subnet_cidr."
 }
 
 variable "caller_cidr" {

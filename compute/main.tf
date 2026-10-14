@@ -116,6 +116,11 @@ locals {
   # it is the same everywhere, and the metrics debug rule below must never be
   # widened by an operator into a scrape path.
   iap_range = "35.235.240.0/20"
+
+  psc_region = var.psc_region != "" ? var.psc_region : var.region
+  # Plain HTTP is fine on the PSC path: it never leaves Google's network, and the
+  # baked commitment gate checks every fetched ciphertext against its on-chain hash.
+  ct_source_url = var.enable_ct_server_psc ? "http://${google_compute_address.ct_server_psc[0].address}:${var.ct_server_read_port}" : var.ct_source_url
 }
 
 # --- Network: firewalled to the caller CIDR -----------------------------
@@ -151,6 +156,86 @@ resource "google_compute_firewall" "allow_metrics_debug_over_iap" {
   depends_on              = [google_project_service.apis]
 }
 
+
+# --- PSC (Confidential Space → GKE ct-server read listener) --------------
+# ct-server must not be on the internet, and this VPC cannot peer with the GKE VPC
+# (both use 10.0.0.0/x), so the VM reaches ct-server over Private Service Connect.
+# Producer side (GKE VPC): PSC NAT subnet + service attachment.
+# Consumer side (this VPC): reserved IP + endpoint forwarding rule.
+
+resource "google_compute_subnetwork" "ct_server_psc_nat" {
+  count         = var.enable_ct_server_psc ? 1 : 0
+  name          = "ct-server-read-psc-nat"
+  region        = local.psc_region
+  network       = var.gke_network
+  ip_cidr_range = var.psc_nat_subnet_cidr
+  purpose       = "PRIVATE_SERVICE_CONNECT"
+  depends_on    = [google_project_service.apis]
+
+  lifecycle {
+    precondition {
+      condition     = var.gke_network != ""
+      error_message = "gke_network must be set when enable_ct_server_psc = true."
+    }
+  }
+}
+
+resource "google_compute_service_attachment" "ct_server_read" {
+  count                 = var.enable_ct_server_psc ? 1 : 0
+  name                  = "ct-server-read-attachment"
+  region                = local.psc_region
+  enable_proxy_protocol = false
+  connection_preference = "ACCEPT_MANUAL"
+  nat_subnets           = [google_compute_subnetwork.ct_server_psc_nat[0].self_link]
+  target_service        = "https://www.googleapis.com/compute/v1/projects/${var.compute_project_id}/regions/${local.psc_region}/forwardingRules/${var.ct_server_read_forwarding_rule}"
+  depends_on            = [google_project_service.apis]
+
+  # ct-server has no auth, so no other GCP project may open an endpoint to it.
+  consumer_accept_lists {
+    project_id_or_num = var.compute_project_id
+    connection_limit  = 1
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.ct_server_read_forwarding_rule != ""
+      error_message = "ct_server_read_forwarding_rule must be set when enable_ct_server_psc = true."
+    }
+  }
+}
+
+resource "google_compute_subnetwork" "ct_server_psc_consumer" {
+  count         = var.enable_ct_server_psc ? 1 : 0
+  name          = "teecryptor-psc-consumer"
+  region        = local.psc_region
+  network       = local.network
+  ip_cidr_range = var.psc_consumer_subnet_cidr
+  depends_on    = [google_project_service.apis]
+}
+
+resource "google_compute_address" "ct_server_psc" {
+  count        = var.enable_ct_server_psc ? 1 : 0
+  name         = "teecryptor-ct-server-psc-ip"
+  region       = local.psc_region
+  subnetwork   = google_compute_subnetwork.ct_server_psc_consumer[0].self_link
+  address_type = "INTERNAL"
+  depends_on   = [google_project_service.apis]
+}
+
+resource "google_compute_forwarding_rule" "ct_server_psc" {
+  count                 = var.enable_ct_server_psc ? 1 : 0
+  name                  = "teecryptor-ct-server-psc-endpoint"
+  region                = local.psc_region
+  network               = local.network
+  subnetwork            = google_compute_subnetwork.ct_server_psc_consumer[0].self_link
+  ip_address            = google_compute_address.ct_server_psc[0].id
+  target                = google_compute_service_attachment.ct_server_read[0].self_link
+  load_balancing_scheme = ""
+  # PSC only accepts same-region clients without this, and the VM's region can
+  # differ from the GKE region.
+  allow_psc_global_access = true
+  depends_on              = [google_project_service.apis]
+}
 
 # --- Instance template: source of truth for every MIG instance ----------
 # create_before_destroy lets rolling updates build the new template before
@@ -212,7 +297,7 @@ resource "google_compute_instance_template" "teecryptor" {
     "tee-restart-policy"         = "Never"
     "tee-container-log-redirect" = "true"
     # Operator-set env (whitelisted by the image's allow_env_override LABEL).
-    "tee-env-CT_SOURCE_URL" = var.ct_source_url
+    "tee-env-CT_SOURCE_URL" = local.ct_source_url
     # Baked-environment selector: the key SOURCE (partner projects +
     # per-partner WIF audiences + public bucket/object) is compiled into the
     # binary; COFHE_ENV only picks which blessed environment applies and the binary
@@ -242,12 +327,19 @@ resource "google_compute_instance_template" "teecryptor" {
 
   lifecycle {
     create_before_destroy = true
+
+    precondition {
+      condition     = var.enable_ct_server_psc != (var.ct_source_url != "")
+      error_message = "Set exactly one of ct_source_url or enable_ct_server_psc = true."
+    }
   }
 
   depends_on = [
     google_project_iam_member.log_writer,
     google_project_iam_member.confidential_workload,
     google_compute_firewall.allow_callers,
+    # A VM must never boot pointed at a PSC endpoint that does not exist yet.
+    google_compute_forwarding_rule.ct_server_psc,
   ]
 }
 
@@ -572,4 +664,9 @@ output "network_self_link" {
 output "subnetwork_self_link" {
   description = "Self-link of the subnet in use (created or pre-existing). null when using the default network without an explicit subnet."
   value       = local.subnetwork
+}
+
+output "ct_server_psc_endpoint_ip" {
+  description = "Internal IP of the PSC endpoint to ct-server. null when enable_ct_server_psc = false."
+  value       = var.enable_ct_server_psc ? google_compute_address.ct_server_psc[0].address : null
 }
