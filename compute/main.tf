@@ -118,6 +118,7 @@ locals {
   iap_range = "35.235.240.0/20"
 
   ct_server_psc = var.ct_server_read_forwarding_rule != ""
+  psc_region    = coalesce(var.psc_region, var.region)
   # Plain HTTP is fine on the PSC path: it never leaves Google's network, and the
   # baked commitment gate checks every fetched ciphertext against its on-chain hash.
   ct_source_url = local.ct_server_psc ? "http://${google_compute_address.ct_server_psc[0].address}:9450" : var.ct_source_url
@@ -166,7 +167,7 @@ resource "google_compute_firewall" "allow_metrics_debug_over_iap" {
 resource "google_compute_subnetwork" "ct_server_psc_nat" {
   count         = local.ct_server_psc ? 1 : 0
   name          = "ct-server-read-psc-nat"
-  region        = var.region
+  region        = local.psc_region
   network       = var.gke_network
   ip_cidr_range = var.psc_nat_subnet_cidr
   purpose       = "PRIVATE_SERVICE_CONNECT"
@@ -183,24 +184,27 @@ resource "google_compute_subnetwork" "ct_server_psc_nat" {
 resource "google_compute_service_attachment" "ct_server_read" {
   count                 = local.ct_server_psc ? 1 : 0
   name                  = "ct-server-read-attachment"
-  region                = var.region
+  region                = local.psc_region
   enable_proxy_protocol = false
   connection_preference = "ACCEPT_MANUAL"
   nat_subnets           = [google_compute_subnetwork.ct_server_psc_nat[0].self_link]
-  target_service        = "https://www.googleapis.com/compute/v1/projects/${var.compute_project_id}/regions/${var.region}/forwardingRules/${var.ct_server_read_forwarding_rule}"
+  target_service        = "https://www.googleapis.com/compute/v1/projects/${var.compute_project_id}/regions/${local.psc_region}/forwardingRules/${var.ct_server_read_forwarding_rule}"
   depends_on            = [google_project_service.apis]
 
-  # ct-server has no auth, so no other GCP project may open an endpoint to it.
-  consumer_accept_lists {
-    project_id_or_num = var.compute_project_id
-    connection_limit  = 1
+  # ct-server has no auth, so only listed projects may open an endpoint to it.
+  dynamic "consumer_accept_lists" {
+    for_each = merge({ (var.compute_project_id) = 1 }, var.psc_extra_consumer_projects)
+    content {
+      project_id_or_num = consumer_accept_lists.key
+      connection_limit  = consumer_accept_lists.value
+    }
   }
 }
 
 resource "google_compute_subnetwork" "ct_server_psc_consumer" {
   count         = local.ct_server_psc ? 1 : 0
   name          = "teecryptor-psc-consumer"
-  region        = var.region
+  region        = local.psc_region
   network       = local.network
   ip_cidr_range = var.psc_consumer_subnet_cidr
   depends_on    = [google_project_service.apis]
@@ -209,7 +213,7 @@ resource "google_compute_subnetwork" "ct_server_psc_consumer" {
 resource "google_compute_address" "ct_server_psc" {
   count        = local.ct_server_psc ? 1 : 0
   name         = "teecryptor-ct-server-psc-ip"
-  region       = var.region
+  region       = local.psc_region
   subnetwork   = google_compute_subnetwork.ct_server_psc_consumer[0].self_link
   address_type = "INTERNAL"
   depends_on   = [google_project_service.apis]
@@ -218,13 +222,15 @@ resource "google_compute_address" "ct_server_psc" {
 resource "google_compute_forwarding_rule" "ct_server_psc" {
   count                 = local.ct_server_psc ? 1 : 0
   name                  = "teecryptor-ct-server-psc-endpoint"
-  region                = var.region
+  region                = local.psc_region
   network               = local.network
   subnetwork            = google_compute_subnetwork.ct_server_psc_consumer[0].self_link
   ip_address            = google_compute_address.ct_server_psc[0].id
   target                = google_compute_service_attachment.ct_server_read[0].self_link
   load_balancing_scheme = ""
-  depends_on            = [google_project_service.apis]
+  # The endpoint must sit in the GKE region; the VM in var.region reaches it only with global access.
+  allow_psc_global_access = local.psc_region != var.region
+  depends_on              = [google_project_service.apis]
 }
 
 # --- Instance template: source of truth for every MIG instance ----------

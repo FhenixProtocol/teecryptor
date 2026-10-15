@@ -53,7 +53,19 @@ variable "gke_network" {
 variable "ct_server_read_forwarding_rule" {
   type        = string
   default     = ""
-  description = "Name of the internal LB forwarding rule created by the ct-server-ct-server-read-ilb k8s Service. Setting it creates a PSC path from this VPC to it (NAT subnet + service attachment in the GKE VPC, endpoint here) and points CT_SOURCE_URL at it. The GKE cluster must run in compute_project_id and var.region. Find it with: gcloud compute forwarding-rules list --regions=<region> --project=<project> | grep <the Service's EXTERNAL-IP>"
+  description = "Name of the internal LB forwarding rule created by the ct-server-ct-server-read-ilb k8s Service. Setting it creates a PSC path from this VPC to it (NAT subnet + service attachment in the GKE VPC, endpoint here) and points CT_SOURCE_URL at it. The GKE cluster must run in compute_project_id and psc_region. Find it with: gcloud compute forwarding-rules list --regions=<region> --project=<project> | grep <the Service's EXTERNAL-IP>"
+}
+
+variable "psc_region" {
+  type        = string
+  default     = ""
+  description = "Region of the GKE cluster, where all PSC resources are created. Defaults to var.region. When it differs, the endpoint gets PSC global access so the VM can reach it."
+}
+
+variable "psc_extra_consumer_projects" {
+  type        = map(number)
+  default     = {}
+  description = "Other GCP projects (project ID => connection limit) allowed to open a PSC endpoint to ct-server's read port. compute_project_id is always accepted, with limit 1."
 }
 
 variable "psc_nat_subnet_cidr" {

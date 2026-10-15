@@ -19,9 +19,9 @@ env = "staging"
 ct_source_url = "http://CT_STUB_INTERNAL_IP:9450" # corpus-serving stub in this VPC (first-boot test)
 caller_cidr   = "35.235.240.0/20"                 # IAP range, so `gcloud compute start-iap-tunnel` can reach :8080
 # Private path to the GKE ct-server instead of ct_source_url (drop ct_source_url
-# when enabling it; the GKE cluster must be in `region`). Apply the
-# ct-server-ct-server-read-ilb k8s Service first.
+# when enabling it). Apply the ct-server-ct-server-read-ilb k8s Service first.
 # gke_network                    = "my-gke-vpc"
+# psc_region                     = "europe-west1" # only if the GKE cluster is not in `region`
 # ct_server_read_forwarding_rule = "<forwarding-rule name of the read ILB>"
 #
 # CI image push (defaults already point at FhenixProtocol/teecryptor main):
