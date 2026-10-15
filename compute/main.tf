@@ -116,6 +116,13 @@ locals {
   # it is the same everywhere, and the metrics debug rule below must never be
   # widened by an operator into a scrape path.
   iap_range = "35.235.240.0/20"
+
+  ct_server_psc = var.ct_server_service_attachment != ""
+  # A PSC endpoint must sit in its attachment's region (the GKE cluster's).
+  psc_region = local.ct_server_psc ? regex("/regions/([^/]+)/serviceAttachments/", var.ct_server_service_attachment)[0] : var.region
+  # Plain HTTP is fine on the PSC path: it never leaves Google's network, and the
+  # baked commitment gate checks every fetched ciphertext against its on-chain hash.
+  ct_source_url = local.ct_server_psc ? "http://${google_compute_address.ct_server_psc[0].address}:9450" : var.ct_source_url
 }
 
 # --- Network: firewalled to the caller CIDR -----------------------------
@@ -151,6 +158,44 @@ resource "google_compute_firewall" "allow_metrics_debug_over_iap" {
   depends_on              = [google_project_service.apis]
 }
 
+
+# --- PSC (Confidential Space → GKE ct-server read listener) --------------
+# ct-server must not be on the internet, and this VPC cannot peer with the GKE VPC
+# (both use 10.0.0.0/x), so the VM reaches ct-server over Private Service Connect.
+# The producer side (service attachment, NAT subnet, consumer allow list) is
+# owned by the cluster (cofhe generator); only the endpoint lives here.
+
+resource "google_compute_subnetwork" "ct_server_psc_consumer" {
+  count         = local.ct_server_psc ? 1 : 0
+  name          = "teecryptor-psc-consumer"
+  region        = local.psc_region
+  network       = local.network
+  ip_cidr_range = var.psc_consumer_subnet_cidr
+  depends_on    = [google_project_service.apis]
+}
+
+resource "google_compute_address" "ct_server_psc" {
+  count        = local.ct_server_psc ? 1 : 0
+  name         = "teecryptor-ct-server-psc-ip"
+  region       = local.psc_region
+  subnetwork   = google_compute_subnetwork.ct_server_psc_consumer[0].self_link
+  address_type = "INTERNAL"
+  depends_on   = [google_project_service.apis]
+}
+
+resource "google_compute_forwarding_rule" "ct_server_psc" {
+  count                 = local.ct_server_psc ? 1 : 0
+  name                  = "teecryptor-ct-server-psc-endpoint"
+  region                = local.psc_region
+  network               = local.network
+  subnetwork            = google_compute_subnetwork.ct_server_psc_consumer[0].self_link
+  ip_address            = google_compute_address.ct_server_psc[0].id
+  target                = var.ct_server_service_attachment
+  load_balancing_scheme = ""
+  # The endpoint must sit in the GKE region; the VM in var.region reaches it only with global access.
+  allow_psc_global_access = local.psc_region != var.region
+  depends_on              = [google_project_service.apis]
+}
 
 # --- Instance template: source of truth for every MIG instance ----------
 # create_before_destroy lets rolling updates build the new template before
@@ -212,7 +257,7 @@ resource "google_compute_instance_template" "teecryptor" {
     "tee-restart-policy"         = "Never"
     "tee-container-log-redirect" = "true"
     # Operator-set env (whitelisted by the image's allow_env_override LABEL).
-    "tee-env-CT_SOURCE_URL" = var.ct_source_url
+    "tee-env-CT_SOURCE_URL" = local.ct_source_url
     # Baked-environment selector: the key SOURCE (partner projects +
     # per-partner WIF audiences + public bucket/object) is compiled into the
     # binary; COFHE_ENV only picks which blessed environment applies and the binary
@@ -242,12 +287,19 @@ resource "google_compute_instance_template" "teecryptor" {
 
   lifecycle {
     create_before_destroy = true
+
+    precondition {
+      condition     = local.ct_server_psc != (var.ct_source_url != "")
+      error_message = "Set exactly one of ct_source_url or ct_server_service_attachment."
+    }
   }
 
   depends_on = [
     google_project_iam_member.log_writer,
     google_project_iam_member.confidential_workload,
     google_compute_firewall.allow_callers,
+    # A VM must never boot pointed at a PSC endpoint that does not exist yet.
+    google_compute_forwarding_rule.ct_server_psc,
   ]
 }
 

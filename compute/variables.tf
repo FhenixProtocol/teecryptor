@@ -39,7 +39,26 @@ variable "image_reference" {
 # --- Runtime config -----------------------------------------------------
 variable "ct_source_url" {
   type        = string
-  description = "Base URL of the ct-server /GetCT source the VM calls, e.g. http://ct-stub:9450. For the first-boot real-decrypt test this is the corpus-serving stub in this VPC."
+  default     = ""
+  description = "Base URL of the ct-server /GetStoredCt source the VM calls, e.g. http://ct-stub:9450. For the first-boot real-decrypt test this is the corpus-serving stub in this VPC. Leave empty when ct_server_service_attachment is set: the VM then calls the PSC endpoint."
+}
+
+# --- Private path to the GKE ct-server read listener (PSC) -------------------
+variable "ct_server_service_attachment" {
+  type        = string
+  default     = ""
+  description = "URL of ct-server's read PSC service attachment, published by the cofhe generator's ServiceAttachment. Setting it creates a PSC endpoint here, in the attachment's region (with PSC global access when that is not `region`), and points CT_SOURCE_URL at it; this project must be on the attachment's allow list. Get it with: kubectl get serviceattachment ct-server-ct-server-read-ilb -n <namespace> -o jsonpath='{.status.serviceAttachmentURL}'"
+
+  validation {
+    condition     = var.ct_server_service_attachment == "" || can(regex("projects/[^/]+/regions/[^/]+/serviceAttachments/[^/]+$", var.ct_server_service_attachment))
+    error_message = "ct_server_service_attachment must be a service attachment URL (.../projects/P/regions/R/serviceAttachments/NAME)."
+  }
+}
+
+variable "psc_consumer_subnet_cidr" {
+  type        = string
+  default     = "10.0.2.0/29"
+  description = "CIDR for the PSC consumer subnet created in this VPC. Must not overlap var.subnet_cidr."
 }
 
 variable "caller_cidr" {
