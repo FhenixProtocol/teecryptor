@@ -117,8 +117,9 @@ locals {
   # widened by an operator into a scrape path.
   iap_range = "35.235.240.0/20"
 
-  ct_server_psc = var.ct_server_read_forwarding_rule != ""
-  psc_region    = coalesce(var.psc_region, var.region)
+  ct_server_psc = var.ct_server_service_attachment != ""
+  # A PSC endpoint must sit in its attachment's region (the GKE cluster's).
+  psc_region = local.ct_server_psc ? regex("/regions/([^/]+)/serviceAttachments/", var.ct_server_service_attachment)[0] : var.region
   # Plain HTTP is fine on the PSC path: it never leaves Google's network, and the
   # baked commitment gate checks every fetched ciphertext against its on-chain hash.
   ct_source_url = local.ct_server_psc ? "http://${google_compute_address.ct_server_psc[0].address}:9450" : var.ct_source_url
@@ -161,45 +162,8 @@ resource "google_compute_firewall" "allow_metrics_debug_over_iap" {
 # --- PSC (Confidential Space → GKE ct-server read listener) --------------
 # ct-server must not be on the internet, and this VPC cannot peer with the GKE VPC
 # (both use 10.0.0.0/x), so the VM reaches ct-server over Private Service Connect.
-# Producer side (GKE VPC): PSC NAT subnet + service attachment.
-# Consumer side (this VPC): reserved IP + endpoint forwarding rule.
-
-resource "google_compute_subnetwork" "ct_server_psc_nat" {
-  count         = local.ct_server_psc ? 1 : 0
-  name          = "ct-server-read-psc-nat"
-  region        = local.psc_region
-  network       = var.gke_network
-  ip_cidr_range = var.psc_nat_subnet_cidr
-  purpose       = "PRIVATE_SERVICE_CONNECT"
-  depends_on    = [google_project_service.apis]
-
-  lifecycle {
-    precondition {
-      condition     = var.gke_network != ""
-      error_message = "gke_network must be set when ct_server_read_forwarding_rule is."
-    }
-  }
-}
-
-resource "google_compute_service_attachment" "ct_server_read" {
-  count                 = local.ct_server_psc ? 1 : 0
-  name                  = "ct-server-read-attachment"
-  region                = local.psc_region
-  enable_proxy_protocol = false
-  connection_preference = "ACCEPT_MANUAL"
-  nat_subnets           = [google_compute_subnetwork.ct_server_psc_nat[0].self_link]
-  target_service        = "https://www.googleapis.com/compute/v1/projects/${var.compute_project_id}/regions/${local.psc_region}/forwardingRules/${var.ct_server_read_forwarding_rule}"
-  depends_on            = [google_project_service.apis]
-
-  # ct-server has no auth, so only listed projects may open an endpoint to it.
-  dynamic "consumer_accept_lists" {
-    for_each = merge({ (var.compute_project_id) = 1 }, var.psc_extra_consumer_projects)
-    content {
-      project_id_or_num = consumer_accept_lists.key
-      connection_limit  = consumer_accept_lists.value
-    }
-  }
-}
+# The producer side (service attachment, NAT subnet, consumer allow list) is
+# owned by the cluster (cofhe generator); only the endpoint lives here.
 
 resource "google_compute_subnetwork" "ct_server_psc_consumer" {
   count         = local.ct_server_psc ? 1 : 0
@@ -226,7 +190,7 @@ resource "google_compute_forwarding_rule" "ct_server_psc" {
   network               = local.network
   subnetwork            = google_compute_subnetwork.ct_server_psc_consumer[0].self_link
   ip_address            = google_compute_address.ct_server_psc[0].id
-  target                = google_compute_service_attachment.ct_server_read[0].self_link
+  target                = var.ct_server_service_attachment
   load_balancing_scheme = ""
   # The endpoint must sit in the GKE region; the VM in var.region reaches it only with global access.
   allow_psc_global_access = local.psc_region != var.region
@@ -326,7 +290,7 @@ resource "google_compute_instance_template" "teecryptor" {
 
     precondition {
       condition     = local.ct_server_psc != (var.ct_source_url != "")
-      error_message = "Set exactly one of ct_source_url or ct_server_read_forwarding_rule."
+      error_message = "Set exactly one of ct_source_url or ct_server_service_attachment."
     }
   }
 
