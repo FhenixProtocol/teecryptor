@@ -214,6 +214,10 @@ async fn handle_decrypt_v2_submit(
         Err(rejection) => return api.reject(rejection),
     };
     let request_id = Uuid::new_v4().to_string();
+    let handle = match parse_handle(api, &req.ct_tempkey, &request_id) {
+        Ok(handle) => handle,
+        Err(resp) => return resp,
+    };
     let v_format = parse_v_format(&headers);
     let now = chrono::Utc::now().to_rfc3339();
     let started = Instant::now();
@@ -222,7 +226,7 @@ async fn handle_decrypt_v2_submit(
 
     let (pt, ty) = match fetch_decrypt(
         &state,
-        &req.ct_tempkey,
+        &handle,
         req.host_chain_id,
         req.acp.as_ref(),
         &Uuid::parse_str(&request_id).unwrap(),
@@ -240,7 +244,7 @@ async fn handle_decrypt_v2_submit(
     let signature = match resolve_signature(
         api,
         state.inner.signer.as_ref().map(|svc| {
-            svc.sign_decrypt(&pt, ty as i32, req.host_chain_id, &req.ct_tempkey, v_format)
+            svc.sign_decrypt(&pt, ty as i32, req.host_chain_id, handle.as_str(), v_format)
         }),
         &request_id,
     ) {
@@ -264,7 +268,7 @@ async fn handle_decrypt_v2_submit(
     log_op_success(
         "decrypt",
         &request_id,
-        &req.ct_tempkey,
+        handle.as_str(),
         ty as i32,
         req.host_chain_id,
         started,
@@ -325,6 +329,10 @@ async fn handle_sealoutput_v2_submit(
         Err(rejection) => return api.reject(rejection),
     };
     let request_id = Uuid::new_v4().to_string();
+    let handle = match parse_handle(api, &req.ct_tempkey, &request_id) {
+        Ok(handle) => handle,
+        Err(resp) => return resp,
+    };
     let v_format = parse_v_format(&headers);
     let now = chrono::Utc::now().to_rfc3339();
     let started = Instant::now();
@@ -333,13 +341,13 @@ async fn handle_sealoutput_v2_submit(
 
     // sealoutput requires an ACP (the sealingKey must come from somewhere).
     let Some(ref acp) = req.acp else {
-        tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealoutput requires an ACP");
+        tracing::info!(%request_id, ct_tempkey = %handle, "sealoutput requires an ACP");
         return api.err(StatusCode::BAD_REQUEST, "acp_required");
     };
 
     let (pt_u256, ty) = match fetch_decrypt(
         &state,
-        &req.ct_tempkey,
+        &handle,
         req.host_chain_id,
         Some(acp),
         &Uuid::parse_str(&request_id).unwrap(),
@@ -356,7 +364,7 @@ async fn handle_sealoutput_v2_submit(
     let recipient_pk = match hex::decode(sealing_hex) {
         Ok(v) => v,
         Err(e) => {
-            tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey not hex: {e}");
+            tracing::info!(%request_id, ct_tempkey = %handle, "sealingKey not hex: {e}");
             return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
     };
@@ -366,15 +374,15 @@ async fn handle_sealoutput_v2_submit(
     let sealed_result = match seal_to_user(&recipient_pk, &plaintext) {
         Ok(s) => s,
         Err(SealError::BadKeyLength(n)) => {
-            tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey wrong length: {n} bytes");
+            tracing::info!(%request_id, ct_tempkey = %handle, "sealingKey wrong length: {n} bytes");
             return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
         Err(SealError::DegenerateKey) => {
-            tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey is degenerate");
+            tracing::info!(%request_id, ct_tempkey = %handle, "sealingKey is degenerate");
             return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
         Err(SealError::EncryptFailed(e)) => {
-            tracing::error!(%request_id, ct_tempkey = %req.ct_tempkey, "seal (crypto_box) failed: {e}");
+            tracing::error!(%request_id, ct_tempkey = %handle, "seal (crypto_box) failed: {e}");
             return api.err(StatusCode::INTERNAL_SERVER_ERROR, "seal_failed");
         }
     };
@@ -388,7 +396,7 @@ async fn handle_sealoutput_v2_submit(
                 &sealed_result.nonce,
                 ty as i32,
                 req.host_chain_id,
-                &req.ct_tempkey,
+                handle.as_str(),
                 v_format,
             )
         }),
@@ -416,7 +424,7 @@ async fn handle_sealoutput_v2_submit(
     log_op_success(
         "sealoutput",
         &request_id,
-        &req.ct_tempkey,
+        handle.as_str(),
         ty as i32,
         req.host_chain_id,
         started,
@@ -910,24 +918,68 @@ fn parse_v_format(headers: &HeaderMap) -> SignatureVFormat {
         .unwrap_or_default()
 }
 
-/// Convert a validated hex handle into a `U256` for the on-chain ABI calls.
-/// `valid_handle` already guaranteed it's hex; here we only bound it to 32
-/// bytes (64 hex chars) — anything longer can't fit a `U256`. Returns the
-/// error response to short-circuit with on failure. Shared by the ACP and
-/// commitment gates so the conversion happens exactly once per request.
+/// A ciphertext handle in canonical form: `0x` + 64 lowercase hex digits, with
+/// the matching `U256` for the on-chain ABI calls.
+///
+/// Built once per request by [`parse_handle`]. The ACP and commitment gates,
+/// the ct-server fetch, the signer and the logs all read this one value, so no
+/// two of them can disagree about which handle the request names.
+struct Handle {
+    hex: String,
+    u256: U256,
+}
+
+impl Handle {
+    /// Accept exactly 64 hex digits, with or without a `0x`/`0X` prefix.
+    /// Shorter spellings are refused rather than padded: ct-server keys rows by
+    /// the full 64-digit string, and a padded value is not the one the request
+    /// named.
+    fn parse(raw: &str) -> Option<Self> {
+        let digits = raw
+            .strip_prefix("0x")
+            .or_else(|| raw.strip_prefix("0X"))
+            .unwrap_or(raw);
+        if digits.len() != 64 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let u256 = U256::from_str_radix(digits, 16).ok()?;
+        Some(Self {
+            hex: format!("0x{}", digits.to_ascii_lowercase()),
+            u256,
+        })
+    }
+
+    /// `0x` + 64 lowercase hex digits: the form ct-server keys rows by and the
+    /// form the signer hashes.
+    fn as_str(&self) -> &str {
+        &self.hex
+    }
+
+    fn u256(&self) -> U256 {
+        self.u256
+    }
+}
+
+impl std::fmt::Display for Handle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.hex)
+    }
+}
+
+/// Parse the request's handle, or produce the 400 to answer with. Every
+/// handler runs this first, before the admission permit, so a malformed handle
+/// costs no slot and never reaches a gate, ct-server or the signer.
 // `Err(Response)` mirrors the file-wide "short-circuit with an HTTP response"
 // idiom (see `fetch_decrypt`); boxing it here just for this sync helper would
 // be inconsistent with the rest of the module.
 #[allow(clippy::result_large_err)]
-fn handle_to_u256(api: ApiVersion, handle: &str, request_id: &Uuid) -> Result<U256, Response> {
-    let handle_hex = handle.strip_prefix("0x").unwrap_or(handle);
-    if handle_hex.len() > 64 {
-        tracing::info!(%request_id, ct_tempkey = %handle, "handle exceeds 32 bytes (not a U256)");
-        return Err(api.err(StatusCode::BAD_REQUEST, "bad_request"));
-    }
-    let padded = format!("{handle_hex:0>64}");
-    U256::from_str_radix(&padded, 16).map_err(|_| {
-        tracing::info!(%request_id, ct_tempkey = %handle, "handle not parseable as U256");
+fn parse_handle(
+    api: ApiVersion,
+    raw: &str,
+    request_id: &dyn std::fmt::Display,
+) -> Result<Handle, Response> {
+    Handle::parse(raw).ok_or_else(|| {
+        tracing::info!(%request_id, ct_tempkey = %raw, "invalid handle (not 32 bytes of hex)");
         api.err(StatusCode::BAD_REQUEST, "bad_request")
     })
 }
@@ -991,7 +1043,7 @@ fn retryable_204(reason: RetryReason) -> Response {
 /// Run ACP verification for one request. Returns `Some(response)` to
 /// short-circuit the handler with an error; `None` means the ACP checked
 /// out and the handler can continue. Takes the pre-parsed `handle_u256` (see
-/// [`handle_to_u256`]) plus raw fields so `/decrypt` and `/sealoutput` can both
+/// [`Handle::u256`]) plus raw fields so `/decrypt` and `/sealoutput` can both
 /// call it with their own request shapes.
 async fn enforce_acp(
     cfg: &ChainsVerifierConfig,
@@ -1094,7 +1146,7 @@ async fn enforce_acp(
 /// Every failure logs exactly one line with stable `gate`/`reason` fields —
 /// that pair is the alerting contract (log-based metrics key off it), so treat
 /// the values as append-only. Warn-only allows add `mode = "warn_only"`.
-#[allow(clippy::result_large_err)] // same short-circuit idiom as handle_to_u256
+#[allow(clippy::result_large_err)] // same short-circuit idiom as parse_handle
 async fn enforce_commitment(
     cfg: &CommitmentConfig,
     handle_u256: U256,
@@ -1185,7 +1237,7 @@ async fn enforce_commitment(
 ///
 /// Every failure logs exactly one line with stable `gate`/`reason` fields — the
 /// same append-only alerting contract as [`enforce_commitment`].
-#[allow(clippy::result_large_err)] // same short-circuit idiom as handle_to_u256
+#[allow(clippy::result_large_err)] // same short-circuit idiom as parse_handle
 #[allow(clippy::too_many_arguments)] // per-request context, all of it logged
 async fn enforce_commitment_integrity(
     cfg: Option<&CommitmentConfig>,
@@ -1287,30 +1339,24 @@ async fn enforce_commitment_integrity(
     Err(api.err(StatusCode::BAD_GATEWAY, "commitment_mismatch"))
 }
 
-fn valid_handle(h: &str) -> bool {
-    let s = h.strip_prefix("0x").unwrap_or(h);
-    // Handles are short hashes (~32 bytes = 64 hex); bound the length so a caller
-    // can't send a multi-MB "handle".
-    !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Common path for `/decrypt` and `/sealoutput`: validate handle, enforce
-/// ACP (if configured), fetch ciphertext, validate envelope, decrypt to
-/// a `U256`. Returns the decrypted value + the encryption type so the
-/// caller can render its response shape.
+/// Common path for `/decrypt` and `/sealoutput`: enforce ACP (if configured),
+/// fetch ciphertext, validate envelope, decrypt to a `U256`. The handler has
+/// already parsed the handle (see [`parse_handle`]). Returns the decrypted
+/// value + the encryption type so the caller can render its response shape.
 ///
 /// On any failure, returns `Err(Response)` — the handler short-circuits with
 /// that response. The error mapping (HTTP status + stable error code) is the
 /// single source of truth for both endpoints.
 async fn fetch_decrypt(
     state: &AppState,
-    ct_tempkey: &str,
+    handle: &Handle,
     host_chain_id: u64,
     acp: Option<&AcpData>,
     request_id: &Uuid,
     api: ApiVersion,
     labels: &DecryptLabels,
 ) -> Result<(primitive_types::U256, EncryptionType), Response> {
+    let ct_tempkey = handle.as_str();
     // Overload backstop — a retryable "busy, come back" condition, so it's
     // encoded per API version (see `ApiVersion::retryable`). On submit the
     // CofheSDK (@cofhe/sdk) v2 client treats the bodyless 204 as *retryable*
@@ -1330,11 +1376,6 @@ async fn fetch_decrypt(
     };
     // `_admit` is held for the whole request; it drops (frees a slot) on return.
 
-    if !valid_handle(ct_tempkey) {
-        tracing::info!(%request_id, ct_tempkey = %ct_tempkey, "invalid handle (not hex)");
-        return Err(api.err(StatusCode::BAD_REQUEST, "bad_request"));
-    }
-
     // Auth/eligibility gates. The ACP (ACL) check and the commitment check
     // are both on-chain reads on (potentially) different chains, so run them
     // CONCURRENTLY — their latency overlaps instead of summing. The handle is
@@ -1350,13 +1391,10 @@ async fn fetch_decrypt(
     // A select-based short-circuit would save that RPC on the denial path, but
     // denials aren't the path we optimize — keep the sad path simple.
     //
-    // Parse the handle to a U256 once; the ACP/commitment gates and the
-    // type/zone cross-check below all read from it (`handle_to_u256` is pure, so
-    // this is the single conversion per request).
-    let handle_u256 = match handle_to_u256(api, ct_tempkey, request_id) {
-        Ok(v) => v,
-        Err(resp) => return Err(resp),
-    };
+    // The ACP/commitment gates and the type/zone cross-check below all read the
+    // handle the handler already parsed, so there is one conversion per request
+    // and nothing re-parses the raw string.
+    let handle_u256 = handle.u256();
     let handle_bytes = handle_u256.to_be_bytes::<32>();
 
     // `expected_commit` is Some exactly when the commitment gate is enabled —
@@ -1599,6 +1637,10 @@ async fn handle_decrypt(
         Err(rejection) => return api.reject(rejection),
     };
     let request_id = Uuid::new_v4();
+    let handle = match parse_handle(api, &req.ct_tempkey, &request_id) {
+        Ok(handle) => handle,
+        Err(resp) => return resp,
+    };
     let v_format = parse_v_format(&headers);
     let started = Instant::now();
     labels.set_host_chain_id(req.host_chain_id);
@@ -1606,7 +1648,7 @@ async fn handle_decrypt(
 
     let (pt, ty) = match fetch_decrypt(
         &state,
-        &req.ct_tempkey,
+        &handle,
         req.host_chain_id,
         req.acp.as_ref(),
         &request_id,
@@ -1625,7 +1667,7 @@ async fn handle_decrypt(
     let signature = match resolve_signature(
         api,
         state.inner.signer.as_ref().map(|svc| {
-            svc.sign_decrypt(&pt, ty as i32, req.host_chain_id, &req.ct_tempkey, v_format)
+            svc.sign_decrypt(&pt, ty as i32, req.host_chain_id, handle.as_str(), v_format)
         }),
         &request_id.to_string(),
     ) {
@@ -1636,7 +1678,7 @@ async fn handle_decrypt(
     log_op_success(
         "decrypt",
         &request_id.to_string(),
-        &req.ct_tempkey,
+        handle.as_str(),
         ty as i32,
         req.host_chain_id,
         started,
@@ -1666,6 +1708,10 @@ async fn handle_sealoutput(
         Err(rejection) => return api.reject(rejection),
     };
     let request_id = Uuid::new_v4();
+    let handle = match parse_handle(api, &req.ct_tempkey, &request_id) {
+        Ok(handle) => handle,
+        Err(resp) => return resp,
+    };
     let v_format = parse_v_format(&headers);
     let started = Instant::now();
     labels.set_host_chain_id(req.host_chain_id);
@@ -1673,13 +1719,13 @@ async fn handle_sealoutput(
 
     // sealoutput requires an ACP (the sealingKey must come from somewhere).
     let Some(ref acp) = req.acp else {
-        tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealoutput requires an ACP");
+        tracing::info!(%request_id, ct_tempkey = %handle, "sealoutput requires an ACP");
         return api.err(StatusCode::BAD_REQUEST, "acp_required");
     };
 
     let (pt_u256, ty) = match fetch_decrypt(
         &state,
-        &req.ct_tempkey,
+        &handle,
         req.host_chain_id,
         Some(acp),
         &request_id,
@@ -1698,7 +1744,7 @@ async fn handle_sealoutput(
     let recipient_pk = match hex::decode(sealing_hex) {
         Ok(v) => v,
         Err(e) => {
-            tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey not hex: {e}");
+            tracing::info!(%request_id, ct_tempkey = %handle, "sealingKey not hex: {e}");
             return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
     };
@@ -1712,15 +1758,15 @@ async fn handle_sealoutput(
     let sealed_result = match seal_to_user(&recipient_pk, &plaintext) {
         Ok(s) => s,
         Err(SealError::BadKeyLength(n)) => {
-            tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey wrong length: {n} bytes");
+            tracing::info!(%request_id, ct_tempkey = %handle, "sealingKey wrong length: {n} bytes");
             return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
         Err(SealError::DegenerateKey) => {
-            tracing::info!(%request_id, ct_tempkey = %req.ct_tempkey, "sealingKey is degenerate");
+            tracing::info!(%request_id, ct_tempkey = %handle, "sealingKey is degenerate");
             return api.err(StatusCode::BAD_REQUEST, "acp_malformed");
         }
         Err(SealError::EncryptFailed(e)) => {
-            tracing::error!(%request_id, ct_tempkey = %req.ct_tempkey, "seal (crypto_box) failed: {e}");
+            tracing::error!(%request_id, ct_tempkey = %handle, "seal (crypto_box) failed: {e}");
             return api.err(StatusCode::INTERNAL_SERVER_ERROR, "seal_failed");
         }
     };
@@ -1734,7 +1780,7 @@ async fn handle_sealoutput(
                 &sealed_result.nonce,
                 ty as i32,
                 req.host_chain_id,
-                &req.ct_tempkey,
+                handle.as_str(),
                 v_format,
             )
         }),
@@ -1747,7 +1793,7 @@ async fn handle_sealoutput(
     log_op_success(
         "sealoutput",
         &request_id.to_string(),
-        &req.ct_tempkey,
+        handle.as_str(),
         ty as i32,
         req.host_chain_id,
         started,
@@ -1902,7 +1948,7 @@ mod tests {
         let base = spawn(state).await;
         let r = reqwest::Client::new()
             .post(format!("{base}/v2/decrypt"))
-            .json(&serde_json::json!({ "ct_tempkey": "0xabc", "host_chain_id": TEST_CHAIN_ID }))
+            .json(&serde_json::json!({ "ct_tempkey": typed_handle(4), "host_chain_id": TEST_CHAIN_ID }))
             .send()
             .await
             .unwrap();
@@ -2287,7 +2333,7 @@ mod tests {
         // carrying the machine-readable retry reason.
         let r2 = client
             .post(format!("{base}/v2/decrypt"))
-            .json(&serde_json::json!({ "ct_tempkey": "0x02", "host_chain_id": 420105u64 }))
+            .json(&serde_json::json!({ "ct_tempkey": typed_handle(4), "host_chain_id": 420105u64 }))
             .send()
             .await
             .unwrap();
@@ -2305,7 +2351,7 @@ mod tests {
         // v1 sheds with 503 + a JSON body — a bodyless 204 would crash old clients.
         let r3 = client
             .post(format!("{base}/decrypt"))
-            .json(&serde_json::json!({ "ct_tempkey": "0x03", "host_chain_id": 420105u64 }))
+            .json(&serde_json::json!({ "ct_tempkey": typed_handle(4), "host_chain_id": 420105u64 }))
             .send()
             .await
             .unwrap();
@@ -2508,7 +2554,7 @@ mod tests {
     /// it reaches the ct-fetch. The sealingKey is only used *after* the fetch.
     fn not_ready_seal_body() -> serde_json::Value {
         serde_json::json!({
-            "ct_tempkey": "0xabc",
+            "ct_tempkey": typed_handle(4),
             "host_chain_id": 420105u64,
             "acp": {
                 "issuer": "0x0000000000000000000000000000000000000001",
@@ -2548,7 +2594,7 @@ mod tests {
     }
 
     fn not_ready_decrypt_body() -> serde_json::Value {
-        serde_json::json!({ "ct_tempkey": "0xabc", "host_chain_id": 420105u64 })
+        serde_json::json!({ "ct_tempkey": typed_handle(4), "host_chain_id": 420105u64 })
     }
 
     #[tokio::test]
@@ -3999,5 +4045,118 @@ mod tests {
             .is_some(),
             "scraped exposition missing the recorded 404 in:\n{text}"
         );
+    }
+    /// `/sealoutput` body with `handle`. The ACP only has to pass the
+    /// "ACP required" gate; the sealing key is used after the handle is.
+    fn seal_body_for(handle: &str) -> serde_json::Value {
+        let mut body = not_ready_seal_body();
+        body["ct_tempkey"] = serde_json::Value::String(handle.to_string());
+        body
+    }
+
+    /// A handle that is not exactly 32 bytes is rejected with 400 before any
+    /// gate runs and before ct-server is asked for anything. Odd-length,
+    /// over-long and short spellings are all covered.
+    #[tokio::test]
+    async fn non_32_byte_handle_is_rejected_before_any_fetch() {
+        let ct = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/GetStoredCt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(u32_ct_body(1)))
+            .mount(&ct)
+            .await;
+        let state = AppState::new(keystore(), ct_source(&ct.uri()), None);
+        state.set_ready();
+        let base = spawn(state).await;
+        let client = reqwest::Client::new();
+        let bad_handles = [
+            format!("0x{}", "7".repeat(63)),
+            format!("0x{}", "7".repeat(65)),
+            format!("0x{}{}", "11".repeat(32), "22"),
+            "0xabc".to_string(),
+        ];
+        for handle in &bad_handles {
+            let decrypt_body =
+                serde_json::json!({ "ct_tempkey": handle, "host_chain_id": TEST_CHAIN_ID });
+            for (route, body) in [
+                ("/decrypt", decrypt_body.clone()),
+                ("/v2/decrypt", decrypt_body.clone()),
+                ("/sealoutput", seal_body_for(handle)),
+                ("/v2/sealoutput", seal_body_for(handle)),
+            ] {
+                let r = client
+                    .post(format!("{base}{route}"))
+                    .json(&body)
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), 400, "{route} accepted handle {handle}");
+                let b: serde_json::Value = r.json().await.unwrap();
+                assert_eq!(b["error"], "bad_request", "{route} {handle}");
+            }
+        }
+        assert!(
+            ct.received_requests().await.unwrap().is_empty(),
+            "ct-server was asked for a malformed handle"
+        );
+    }
+
+    /// The handle is canonicalised once (`0x` + 64 lowercase hex) and that one
+    /// value reaches ct-server and the signer, so an upper-case or unprefixed
+    /// spelling fetches the same row and yields the same signature as the
+    /// canonical spelling.
+    #[tokio::test]
+    async fn handle_spelling_is_canonicalised_for_fetch_and_signature() {
+        use wiremock::matchers::body_json;
+        let canonical = typed_handle(4);
+        let ct = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/GetStoredCt"))
+            .and(body_json(serde_json::json!({ "hash": canonical })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(u32_ct_body(42)))
+            .mount(&ct)
+            .await;
+        let signer = || {
+            crate::signing::service::SigningService::new(
+                crate::signing::Signer::from_bytes(&[1u8; 32]).unwrap(),
+            )
+        };
+        let state = AppState::new(keystore(), ct_source(&ct.uri()), Some(signer()));
+        state.set_ready();
+        let base = spawn(state).await;
+        let expected = signer()
+            .sign_decrypt(
+                &primitive_types::U256::from(42u32),
+                4,
+                TEST_CHAIN_ID,
+                &canonical,
+                SignatureVFormat::Raw,
+            )
+            .unwrap();
+        let bare = canonical.trim_start_matches("0x").to_string();
+        for spelling in [
+            format!("0X{}", bare.to_uppercase()),
+            bare.to_uppercase(),
+            bare.clone(),
+        ] {
+            let r = reqwest::Client::new()
+                .post(format!("{base}/decrypt"))
+                .json(
+                    &serde_json::json!({ "ct_tempkey": spelling, "host_chain_id": TEST_CHAIN_ID }),
+                )
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                r.status(),
+                200,
+                "spelling {spelling} was not canonicalised for the fetch"
+            );
+            let b: serde_json::Value = r.json().await.unwrap();
+            assert_eq!(
+                b["signature"], expected,
+                "spelling {spelling} signed a different handle"
+            );
+        }
     }
 }

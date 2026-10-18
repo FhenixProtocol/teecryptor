@@ -81,10 +81,22 @@ fn sign_decrypt_evm_v_format_differs_only_in_last_byte() {
     let pt = U256::from(42u32);
 
     let raw = svc
-        .sign_decrypt(&pt, 4, 1, "0xabcd", SignatureVFormat::Raw)
+        .sign_decrypt(
+            &pt,
+            4,
+            1,
+            "0xabababababababababababababababababababababababababababababababab",
+            SignatureVFormat::Raw,
+        )
         .unwrap();
     let evm = svc
-        .sign_decrypt(&pt, 4, 1, "0xabcd", SignatureVFormat::Evm)
+        .sign_decrypt(
+            &pt,
+            4,
+            1,
+            "0xabababababababababababababababababababababababababababababababab",
+            SignatureVFormat::Evm,
+        )
         .unwrap();
 
     let raw_b = hex::decode(&raw).unwrap();

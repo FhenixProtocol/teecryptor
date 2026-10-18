@@ -73,9 +73,12 @@ impl SigningService {
     ///   result(32 B, U256 big-endian)
     ///   ‖ encryption_type(4 B, i32 big-endian)
     ///   ‖ chain_id(8 B, u64 big-endian)
-    ///   ‖ ct_hash(32 B, hex-parsed, left-zero-padded)
+    ///   ‖ ct_hash(32 B, hex-parsed, exactly 32 bytes)
     /// )
     /// ```
+    ///
+    /// # Errors
+    /// `ct_hash` that is not exactly 32 bytes of hex, or a signing failure.
     pub fn sign_decrypt(
         &self,
         plaintext: &U256,
@@ -96,8 +99,8 @@ impl SigningService {
         // chain_id: u64 big-endian (8 bytes)
         preimage.extend_from_slice(&chain_id.to_be_bytes());
 
-        // ct_hash: hex-parsed, left-zero-padded to 32 bytes
-        preimage.extend_from_slice(&parse_hex_to_32_bytes(ct_hash));
+        // ct_hash: hex-parsed, exactly 32 bytes
+        preimage.extend_from_slice(&parse_ct_hash(ct_hash)?);
 
         let hash = Signer::keccak256(&preimage);
         self.signer.sign_prehash_to_hex_with_format(&hash, v_format)
@@ -111,11 +114,14 @@ impl SigningService {
     ///   sealed ‖ ephemeral_pk ‖ nonce
     ///   ‖ encryption_type(4 B, i32 big-endian)
     ///   ‖ chain_id(8 B, u64 big-endian)
-    ///   ‖ ct_hash(32 B, hex-parsed, left-zero-padded)
+    ///   ‖ ct_hash(32 B, hex-parsed, exactly 32 bytes)
     /// )
     /// ```
     // Mirrors the dispatcher's `sign_sealoutput` arity exactly (sealed, eph_pk,
     // nonce, enc_type, chain_id, ct_hash, v_format) — same allow as upstream.
+    ///
+    /// # Errors
+    /// `ct_hash` that is not exactly 32 bytes of hex, or a signing failure.
     #[allow(clippy::too_many_arguments)]
     pub fn sign_sealoutput(
         &self,
@@ -139,23 +145,27 @@ impl SigningService {
         // chain_id: u64 big-endian (8 bytes)
         preimage.extend_from_slice(&chain_id.to_be_bytes());
 
-        // ct_hash: hex-parsed, left-zero-padded to 32 bytes
-        preimage.extend_from_slice(&parse_hex_to_32_bytes(ct_hash));
+        // ct_hash: hex-parsed, exactly 32 bytes
+        preimage.extend_from_slice(&parse_ct_hash(ct_hash)?);
 
         let hash = Signer::keccak256(&preimage);
         self.signer.sign_prehash_to_hex_with_format(&hash, v_format)
     }
 }
 
-/// Parse a hex string (with or without "0x" prefix) into a 32-byte array,
-/// left-zero-padded if shorter than 32 bytes. Mirrors the dispatcher helper.
-fn parse_hex_to_32_bytes(hex_str: &str) -> [u8; 32] {
+/// Parse a hex ciphertext handle (with or without a "0x" prefix) into exactly
+/// 32 bytes.
+///
+/// Deliberately stricter than the dispatcher helper it mirrors, which pads a
+/// short input and truncates a long one: a padded or truncated value is not
+/// the handle the caller named. The HTTP layer canonicalises the handle
+/// before it gets here; this is the second lock.
+fn parse_ct_hash(hex_str: &str) -> Result<[u8; 32], SigningError> {
     let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
-    let bytes = hex::decode(stripped).unwrap_or_default();
-    let mut result = [0u8; 32];
-    let start = 32usize.saturating_sub(bytes.len());
-    result[start..].copy_from_slice(&bytes[..bytes.len().min(32)]);
-    result
+    let bytes = hex::decode(stripped)?;
+    <[u8; 32]>::try_from(bytes).map_err(|bytes| {
+        SigningError::HexDecodeError(format!("ct_hash must be 32 bytes, got {}", bytes.len()))
+    })
 }
 
 #[cfg(test)]
@@ -168,12 +178,51 @@ mod tests {
         SigningService::new(Signer::from_bytes(&[1u8; 32]).unwrap())
     }
 
+    /// A well-formed handle: 32 bytes as 64 hex digits.
+    const HANDLE: &str = "0xabababababababababababababababababababababababababababababababab";
+
+    /// No signature for anything that is not a 32-byte handle: odd-length,
+    /// over-long, short and empty spellings alike.
+    #[test]
+    fn sign_decrypt_rejects_handle_that_is_not_32_bytes() {
+        let svc = test_service();
+        let pt = U256::from(1u32);
+        for bad in [
+            format!("0x{}", "a".repeat(63)),
+            format!("0x{}{}", "11".repeat(32), "22"),
+            "0xabcd".to_string(),
+            "0x".to_string(),
+        ] {
+            assert!(
+                svc.sign_decrypt(&pt, 0, 1, &bad, SignatureVFormat::Raw)
+                    .is_err(),
+                "signed handle {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn sign_sealoutput_rejects_handle_that_is_not_32_bytes() {
+        let svc = test_service();
+        let odd = format!("0x{}", "a".repeat(63));
+        let signed = svc.sign_sealoutput(
+            b"sealed",
+            &[1u8; 32],
+            &[2u8; 24],
+            0,
+            1,
+            &odd,
+            SignatureVFormat::Raw,
+        );
+        assert!(signed.is_err(), "signed an odd-length handle");
+    }
+
     #[test]
     fn sign_decrypt_returns_130_char_hex() {
         let svc = test_service();
         let pt = U256::from(42u32);
         let sig = svc
-            .sign_decrypt(&pt, 4, 420105, "0xdeadbeef", SignatureVFormat::Raw)
+            .sign_decrypt(&pt, 4, 420105, HANDLE, SignatureVFormat::Raw)
             .unwrap();
         assert_eq!(sig.len(), 130);
         assert!(hex::decode(&sig).is_ok());
@@ -184,10 +233,10 @@ mod tests {
         let svc = test_service();
         let pt = U256::from(1u32);
         let s1 = svc
-            .sign_decrypt(&pt, 2, 1, "0xabcd", SignatureVFormat::Raw)
+            .sign_decrypt(&pt, 2, 1, HANDLE, SignatureVFormat::Raw)
             .unwrap();
         let s2 = svc
-            .sign_decrypt(&pt, 2, 1, "0xabcd", SignatureVFormat::Raw)
+            .sign_decrypt(&pt, 2, 1, HANDLE, SignatureVFormat::Raw)
             .unwrap();
         assert_eq!(s1, s2);
     }
@@ -196,10 +245,10 @@ mod tests {
     fn sign_decrypt_different_plaintexts_differ() {
         let svc = test_service();
         let s1 = svc
-            .sign_decrypt(&U256::from(1u32), 2, 1, "0xab", SignatureVFormat::Raw)
+            .sign_decrypt(&U256::from(1u32), 2, 1, HANDLE, SignatureVFormat::Raw)
             .unwrap();
         let s2 = svc
-            .sign_decrypt(&U256::from(2u32), 2, 1, "0xab", SignatureVFormat::Raw)
+            .sign_decrypt(&U256::from(2u32), 2, 1, HANDLE, SignatureVFormat::Raw)
             .unwrap();
         assert_ne!(s1, s2);
     }
@@ -214,7 +263,7 @@ mod tests {
                 &[7u8, 8, 9],
                 4,
                 420105,
-                "0xdeadbeef",
+                HANDLE,
                 SignatureVFormat::Raw,
             )
             .unwrap();
