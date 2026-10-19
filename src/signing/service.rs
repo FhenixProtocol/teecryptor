@@ -153,15 +153,19 @@ impl SigningService {
     }
 }
 
-/// Parse a hex ciphertext handle (with or without a "0x" prefix) into exactly
-/// 32 bytes.
+/// Parse a hex ciphertext handle into exactly 32 bytes. Accepts the spellings
+/// `Handle::parse` accepts, `0x`, `0X` or no prefix, so the two parsers never
+/// disagree about a handle.
 ///
 /// Deliberately stricter than the dispatcher helper it mirrors, which pads a
 /// short input and truncates a long one: a padded or truncated value is not
 /// the handle the caller named. The HTTP layer canonicalises the handle
 /// before it gets here; this is the second lock.
 fn parse_ct_hash(hex_str: &str) -> Result<[u8; 32], SigningError> {
-    let stripped = hex_str.strip_prefix("0x").unwrap_or(hex_str);
+    let stripped = hex_str
+        .strip_prefix("0x")
+        .or_else(|| hex_str.strip_prefix("0X"))
+        .unwrap_or(hex_str);
     let bytes = hex::decode(stripped)?;
     <[u8; 32]>::try_from(bytes).map_err(|bytes| {
         SigningError::HexDecodeError(format!("ct_hash must be 32 bytes, got {}", bytes.len()))
@@ -197,6 +201,29 @@ mod tests {
                 svc.sign_decrypt(&pt, 0, 1, &bad, SignatureVFormat::Raw)
                     .is_err(),
                 "signed handle {bad}"
+            );
+        }
+    }
+
+    /// The same spellings `Handle::parse` accepts: `0x`, `0X` or no prefix,
+    /// any case. The two parsers must never disagree about a handle.
+    #[test]
+    fn sign_decrypt_accepts_the_same_prefix_spellings_as_the_handle_parser() {
+        let svc = test_service();
+        let pt = U256::from(1u32);
+        let canonical = svc
+            .sign_decrypt(&pt, 0, 1, HANDLE, SignatureVFormat::Raw)
+            .unwrap();
+        for spelling in [
+            format!("0X{}", &HANDLE[2..]),
+            HANDLE[2..].to_uppercase(),
+            format!("0X{}", HANDLE[2..].to_uppercase()),
+        ] {
+            let signed = svc.sign_decrypt(&pt, 0, 1, &spelling, SignatureVFormat::Raw);
+            assert_eq!(
+                signed.ok().as_deref(),
+                Some(canonical.as_str()),
+                "spelling {spelling}"
             );
         }
     }

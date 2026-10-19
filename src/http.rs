@@ -214,6 +214,8 @@ async fn handle_decrypt_v2_submit(
         Err(rejection) => return api.reject(rejection),
     };
     let request_id = Uuid::new_v4().to_string();
+    labels.set_host_chain_id(req.host_chain_id);
+    labels.set_acp_presented(req.acp.is_some());
     let handle = match parse_handle(api, &req.ct_tempkey, &request_id) {
         Ok(handle) => handle,
         Err(resp) => return resp,
@@ -221,8 +223,6 @@ async fn handle_decrypt_v2_submit(
     let v_format = parse_v_format(&headers);
     let now = chrono::Utc::now().to_rfc3339();
     let started = Instant::now();
-    labels.set_host_chain_id(req.host_chain_id);
-    labels.set_acp_presented(req.acp.is_some());
 
     let (pt, ty) = match fetch_decrypt(
         &state,
@@ -329,6 +329,8 @@ async fn handle_sealoutput_v2_submit(
         Err(rejection) => return api.reject(rejection),
     };
     let request_id = Uuid::new_v4().to_string();
+    labels.set_host_chain_id(req.host_chain_id);
+    labels.set_acp_presented(req.acp.is_some());
     let handle = match parse_handle(api, &req.ct_tempkey, &request_id) {
         Ok(handle) => handle,
         Err(resp) => return resp,
@@ -336,8 +338,6 @@ async fn handle_sealoutput_v2_submit(
     let v_format = parse_v_format(&headers);
     let now = chrono::Utc::now().to_rfc3339();
     let started = Instant::now();
-    labels.set_host_chain_id(req.host_chain_id);
-    labels.set_acp_presented(req.acp.is_some());
 
     // sealoutput requires an ACP (the sealingKey must come from somewhere).
     let Some(ref acp) = req.acp else {
@@ -1637,14 +1637,14 @@ async fn handle_decrypt(
         Err(rejection) => return api.reject(rejection),
     };
     let request_id = Uuid::new_v4();
+    labels.set_host_chain_id(req.host_chain_id);
+    labels.set_acp_presented(req.acp.is_some());
     let handle = match parse_handle(api, &req.ct_tempkey, &request_id) {
         Ok(handle) => handle,
         Err(resp) => return resp,
     };
     let v_format = parse_v_format(&headers);
     let started = Instant::now();
-    labels.set_host_chain_id(req.host_chain_id);
-    labels.set_acp_presented(req.acp.is_some());
 
     let (pt, ty) = match fetch_decrypt(
         &state,
@@ -1708,14 +1708,14 @@ async fn handle_sealoutput(
         Err(rejection) => return api.reject(rejection),
     };
     let request_id = Uuid::new_v4();
+    labels.set_host_chain_id(req.host_chain_id);
+    labels.set_acp_presented(req.acp.is_some());
     let handle = match parse_handle(api, &req.ct_tempkey, &request_id) {
         Ok(handle) => handle,
         Err(resp) => return resp,
     };
     let v_format = parse_v_format(&headers);
     let started = Instant::now();
-    labels.set_host_chain_id(req.host_chain_id);
-    labels.set_acp_presented(req.acp.is_some());
 
     // sealoutput requires an ACP (the sealingKey must come from somewhere).
     let Some(ref acp) = req.acp else {
@@ -3878,6 +3878,41 @@ mod tests {
             )
             .is_some(),
             "the served chain must be labeled by its id in:\n{text}"
+        );
+    }
+
+    /// A malformed handle is rejected first thing, but the rejection still
+    /// carries the chain and ACP labels: both are recorded at handler entry,
+    /// ahead of every early return, so no 400 reaches the metrics as
+    /// `host_chain_id="unknown"`.
+    #[tokio::test]
+    async fn metrics_decrypt_labels_a_malformed_handle_by_chain_and_acp() {
+        let state = AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None)
+            .with_metrics(Metrics::new([TEST_CHAIN_ID]));
+        state.set_ready();
+        let base = spawn(state.clone()).await;
+
+        let r = reqwest::Client::new()
+            .post(format!("{base}/decrypt"))
+            .json(&serde_json::json!({ "ct_tempkey": "0xabc", "host_chain_id": TEST_CHAIN_ID }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+
+        let text = state.metrics().render().unwrap();
+        assert!(
+            sample(
+                &text,
+                DECRYPT_REQUESTS,
+                &[
+                    r#"http_route="/decrypt""#,
+                    r#"host_chain_id="420105""#,
+                    r#"acp="absent""#,
+                ],
+            )
+            .is_some(),
+            "a malformed-handle 400 must keep its chain and ACP labels in:\n{text}"
         );
     }
 
