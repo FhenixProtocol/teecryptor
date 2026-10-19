@@ -35,8 +35,12 @@ The ACP object, the EIP-712 domain, and the typed-data types are in
 
 ## Ciphertext
 
-You reference a ciphertext by **handle**, not by sending its bytes. Teecryptor
-fetches the stored **compressed** ciphertext from cofhe's ct-server
+You reference a ciphertext by **handle**, not by sending its bytes. A handle is
+exactly 32 bytes: 64 hex digits, with or without a `0x` prefix. Teecryptor
+rejects any other length with `400 bad_request`. It does not pad a short
+handle or truncate a long one.
+
+Teecryptor fetches the stored **compressed** ciphertext from cofhe's ct-server
 (`POST /GetStoredCt`) and decrypts that form. The fetch is in `src/ct_source.rs`;
 the accepted form and the type mapping are in `src/decrypt.rs`.
 
