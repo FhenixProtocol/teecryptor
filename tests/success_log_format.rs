@@ -144,7 +144,10 @@ async fn print_success_log_example() {
     // with request_id + ct handle + a clear message.
     let fj: serde_json::Value = serde_json::from_str(failure).unwrap();
     assert_eq!(fj["level"], "INFO");
-    assert_eq!(fj["fields"]["message"], "invalid handle (not hex)");
+    assert_eq!(
+        fj["fields"]["message"],
+        "invalid handle (not 32 bytes of hex)"
+    );
     assert_eq!(fj["fields"]["ct_tempkey"], "nothex!");
     assert!(fj["fields"]["request_id"].as_str().is_some());
 

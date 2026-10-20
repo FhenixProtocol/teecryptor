@@ -45,7 +45,7 @@ tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "json"] }
 anyhow = "=1.0.103"
 base64 = "=0.22.1"
-rustls = { version = "=0.23.45", features = ["ring"] }
+rustls = { version = "=0.23.46", features = ["ring"] }
 # Ethereum stack — used by the permit module to verify EIP-712 issuer signatures
 # locally and to call TaskManager.isAllowedWithPermission via JSON-RPC. Matches
 # cofhe's dispatcher version so the same Permission struct shape is on the wire.
