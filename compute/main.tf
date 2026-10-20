@@ -441,6 +441,13 @@ resource "google_compute_security_policy" "teecryptor" {
   description = "Cloud Armor policy for the teecryptor HTTPS load balancer."
   type        = "CLOUD_ARMOR"
 
+  lifecycle {
+    precondition {
+      condition     = alltrue([for r in local.armor_rules : r.priority > 100])
+      error_message = "Custom Cloud Armor rule priorities must be greater than 100, so they run after the deprecated-poll deny."
+    }
+  }
+
   # Adaptive Protection builds a traffic baseline and flags layer 7 DDoS
   # attacks in Cloud Logging, with a suggested mitigation rule. Automatic
   # deployment of that rule is out of scope here; the google provider does not
