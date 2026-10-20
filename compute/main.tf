@@ -430,10 +430,11 @@ locals {
   armor_rules = var.armor_rules_file != "" ? jsondecode(file(var.armor_rules_file)) : []
 }
 
-# Cloud Armor security policy. It applies three layers, in priority order:
-#   1. Custom rules from var.armor_rules_file (IP allow and deny lists).
-#   2. A per-client rate limit that bans abusive source IPs.
-#   3. The default rule, which allows the remaining traffic.
+# Cloud Armor security policy. It applies four layers, in priority order:
+#   1. A deny for the deprecated decrypt result poll.
+#   2. Custom rules from var.armor_rules_file (IP allow and deny lists).
+#   3. A per-client rate limit that bans abusive source IPs.
+#   4. The default rule, which allows the remaining traffic.
 # Adaptive Protection watches the backend and reports layer 7 DDoS attacks.
 resource "google_compute_security_policy" "teecryptor" {
   name        = "teecryptor-armor"
@@ -456,6 +457,21 @@ resource "google_compute_security_policy" "teecryptor" {
   # traffic visible in the load balancer logs.
   advanced_options_config {
     log_level = "VERBOSE"
+  }
+
+  # GET /v2/decrypt/{request_id} is the poll from the old async decrypt API.
+  # Decrypt is sync now: the POST returns the result, and the SDK reads it from
+  # there. The poll is deprecated at the edge, so no new image is needed. The
+  # priority sits above the custom rules, so no IP rule reopens it.
+  rule {
+    action      = "deny(404)"
+    priority    = 100
+    description = "Deprecated async poll: GET /v2/decrypt/{id}, decrypt is sync"
+    match {
+      expr {
+        expression = "request.method == 'GET' && request.path.matches('(?i)^/+v2/+decrypt/')"
+      }
+    }
   }
 
   dynamic "rule" {
