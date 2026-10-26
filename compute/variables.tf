@@ -61,8 +61,12 @@ variable "psc_consumer_subnet_cidr" {
   description = "CIDR for the PSC consumer subnet created in this VPC. Must not overlap var.subnet_cidr."
 
   validation {
-    condition     = can(cidrnetmask(var.psc_consumer_subnet_cidr))
-    error_message = "psc_consumer_subnet_cidr must be an IPv4 CIDR such as 10.0.2.0/29."
+    condition = (
+      can(cidrnetmask(var.psc_consumer_subnet_cidr)) &&
+      try(cidrsubnet(var.psc_consumer_subnet_cidr, 0, 0) == var.psc_consumer_subnet_cidr, false) &&
+      try(tonumber(split("/", var.psc_consumer_subnet_cidr)[1]) <= 29, false)
+    )
+    error_message = "psc_consumer_subnet_cidr must be an IPv4 network address with a prefix of /29 or shorter, such as 10.0.2.0/29."
   }
 }
 
