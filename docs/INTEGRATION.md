@@ -14,8 +14,10 @@ Routes are wired in `src/main.rs`; the handlers and every request and response
 type are in `src/http.rs`.
 
 - `POST /decrypt`, `POST /sealoutput` — v1, synchronous.
-- `POST /v2/decrypt`, `POST /v2/sealoutput` — v2, synchronous. A matching
-  `GET /v2/decrypt/{id}` (and the seal equivalent) returns the same result.
+- `POST /v2/decrypt`, `POST /v2/sealoutput` — v2, synchronous. The result is
+  in the POST response. The old async polls, `GET /v2/decrypt/{id}` and
+  `GET /v2/sealoutput/{id}`, are deprecated and return 404 through the load
+  balancer. A direct caller still reaches them until the handlers are removed.
 - `GET /signerAddress` — the address that signs responses.
 - `GET /healthz` — readiness.
 
