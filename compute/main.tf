@@ -431,7 +431,7 @@ locals {
 }
 
 # Cloud Armor security policy. It applies four layers, in priority order:
-#   1. A deny for the deprecated decrypt result poll.
+#   1. A deny for the deprecated async result polls.
 #   2. Custom rules from var.armor_rules_file (IP allow and deny lists).
 #   3. A per-client rate limit that bans abusive source IPs.
 #   4. The default rule, which allows the remaining traffic.
@@ -444,7 +444,7 @@ resource "google_compute_security_policy" "teecryptor" {
   lifecycle {
     precondition {
       condition     = alltrue([for r in local.armor_rules : r.priority > 100])
-      error_message = "Custom Cloud Armor rule priorities must be greater than 100, so they run after the deprecated-poll deny."
+      error_message = "Custom Cloud Armor rule priorities must be greater than 100, so they run after the deprecated-polls deny."
     }
   }
 
@@ -466,17 +466,19 @@ resource "google_compute_security_policy" "teecryptor" {
     log_level = "VERBOSE"
   }
 
-  # GET /v2/decrypt/{request_id} is the poll from the old async decrypt API.
-  # Decrypt is sync now: the POST returns the result, and the SDK reads it from
-  # there. The poll is deprecated at the edge, so no new image is needed. The
-  # priority sits above the custom rules, so no IP rule reopens it.
+  # GET /v2/decrypt/{request_id} and GET /v2/sealoutput/{request_id} are the
+  # polls from the old async API. Both calls are sync now: the POST returns the
+  # result, and the SDK reads it from there. The polls are deprecated at the
+  # edge, so no new image is needed. No method check: axum answers HEAD on a GET
+  # route, and only the polls live under these prefixes. The priority sits above
+  # the custom rules, so no IP rule reopens them.
   rule {
     action      = "deny(404)"
     priority    = 100
-    description = "Deprecated async poll: GET /v2/decrypt/{id}, decrypt is sync"
+    description = "Deprecated async polls: /v2/decrypt/{id}, /v2/sealoutput/{id}"
     match {
       expr {
-        expression = "request.method == 'GET' && request.path.matches('(?i)^/+v2/+decrypt/')"
+        expression = "request.path.matches('(?i)^/+v2/+(decrypt|sealoutput)/')"
       }
     }
   }
