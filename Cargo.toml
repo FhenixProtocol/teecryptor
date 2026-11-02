@@ -28,7 +28,7 @@ serde_json = "=1.0.150"
 # of the attested image digest — not runtime-mutable. See src/env_policy.rs.
 toml = "=1.1.4"
 reqwest = { version = "=0.12.28", features = ["json", "rustls-tls", "blocking"], default-features = false }
-tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "sync"] }
+tokio = { version = "=1.53.3", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "sync"] }
 hex = "=0.4.3"
 # Used by direct_decrypt's mirror decoding: tfhe's safe_deserialize handles the
 # versionized wire format, then the value is re-encoded with plain bincode and
