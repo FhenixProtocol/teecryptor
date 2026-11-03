@@ -87,13 +87,16 @@ deploy:
 	@echo "make deploy is retired — it applied compute/ with no -var-file and never rolled the MIG."; \
 	 echo; \
 	 echo "Pin the digest in the env's gitops var-file AND each partner's attested_readers,"; \
-	 echo "apply the partner Terraform, then:"; \
+	 echo "apply the partner Terraform for the new release FIRST (otherwise the new VM cannot read"; \
+	 echo "its shares and the roll stalls). Only then run the compute apply, which is the roll:"; \
 	 echo; \
 	 echo "  terraform -chdir=compute init -reconfigure \\"; \
 	 echo "    -backend-config=bucket=<env-compute-project>-tfstate \\"; \
 	 echo "    -backend-config=prefix=teecryptor/compute"; \
 	 echo "  terraform -chdir=compute apply -var-file=<gitops>/terraform/<env>/teecryptor/<env>.tfvars"; \
 	 echo; \
+	 echo "  gcloud compute instance-groups managed wait-until --version-target-reached teecryptor-mig \\"; \
+	 echo "    --zone=<zone> --project=<env-compute-project>"; \
 	 echo "  gcloud compute instance-groups managed wait-until --stable teecryptor-mig \\"; \
 	 echo "    --zone=<zone> --project=<env-compute-project>"; \
 	 echo; \
@@ -105,6 +108,8 @@ deploy:
 	 echo "  gcloud compute instances describe <instance> --zone=<zone> --project=<p> \\"; \
 	 echo "    --format='value(metadata.items.filter(\"key:tee-image-reference\").extract(\"value\"))'"; \
 	 echo; \
+	 echo "To restart the same template, use rolling-action replace with --max-surge=1 --max-unavailable=0"; \
+	 echo "(gcloud defaults override the MIG policy and can take the only VM offline)."; \
 	 echo "Full runbook: the gitops repo."; \
 	 exit 1
 

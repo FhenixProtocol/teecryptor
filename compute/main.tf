@@ -317,9 +317,14 @@ resource "google_compute_instance_group_manager" "teecryptor" {
 
   # PROACTIVE: an apply that changes the instance template rolls the VMs itself,
   # one at a time (max_surge 1, max_unavailable 0), gated by auto-healing health.
-  # Wait for it with:
-  #   gcloud compute instance-groups managed wait-until --stable teecryptor-mig --zone=<zone>
-  # To restart the SAME template, use `rolling-action replace`.
+  # Every partner applies the new release first; the compute apply is the roll.
+  # Otherwise the new VM cannot read its shares and the roll stalls.
+  # Wait with two waits, in this order (--stable alone can pass while an old-template VM remains):
+  #   gcloud compute instance-groups managed wait-until --version-target-reached teecryptor-mig --zone=<zone> --project=<project>
+  #   gcloud compute instance-groups managed wait-until --stable teecryptor-mig --zone=<zone> --project=<project>
+  # To restart the SAME template, use `rolling-action replace`. Always pass
+  # `--max-surge=1 --max-unavailable=0`: gcloud's defaults override the MIG policy
+  # and can take the only VM offline.
   # REPLACE (not RESTART/REFRESH): a Confidential VM's boot image can't change
   # in place, so the instance is recreated, which also forces fresh attestation.
   update_policy {
