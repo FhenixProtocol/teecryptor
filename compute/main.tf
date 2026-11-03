@@ -476,13 +476,14 @@ resource "google_compute_security_policy" "teecryptor" {
   # edge, so no new image is needed. No method check: axum answers HEAD on a GET
   # route, and only the polls live under these prefixes. The priority sits above
   # the custom rules, so no IP rule reopens them.
+  # Cloud Armor rejects capture groups in a regex, so the group is non-capturing.
   rule {
     action      = "deny(404)"
     priority    = 100
     description = "Deprecated async polls: /v2/decrypt/{id}, /v2/sealoutput/{id}"
     match {
       expr {
-        expression = "request.path.matches('(?i)^/+v2/+(decrypt|sealoutput)/')"
+        expression = "request.path.matches('(?i)^/+v2/+(?:decrypt|sealoutput)/')"
       }
     }
   }
