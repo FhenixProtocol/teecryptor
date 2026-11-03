@@ -22,6 +22,11 @@ ignore = [
     # lru 0.16.4 unsound LruCache::pop(): forced transitively by alloy-provider
     # (alloy is byte-pinned to cofhe, unfixable our side). Revisit on an alloy bump.
     "RUSTSEC-2026-0253",
+    # crypto-bigint < 0.7.6 timing variability. 0.5.5 is forced by elliptic-curve
+    # 0.13 (k256 / alloy, byte-pinned to cofhe); k256 scalars on the signing path
+    # use it. 0.6.1 is lock-only (vsss-rs `bigint` feature is off). The fix needs
+    # k256 0.14, so revisit on an alloy bump.
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 forced by elliptic-curve 0.13 (k256/alloy); fix needs k256 0.14" },
 ]
 
 [licenses]
