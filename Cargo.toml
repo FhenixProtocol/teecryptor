@@ -86,7 +86,7 @@ http = "=1.4.1"
 # the baked env source, wire format, and reconstruction. `default-features = false`
 # drops the in-enclave `writer` path;
 # pinned by rev so the format the reader decodes cannot drift from the producer.
-cofhe-keys = { git = "https://github.com/FhenixProtocol/cofhe-tdx-keygen.git", rev = "c28c8acab4e8bae3464c67f2339ae8b54c4db30a", version = "0.1.0", default-features = false, features = ["reader"] }
+cofhe-keys = { git = "https://github.com/FhenixProtocol/cofhe-tdx-keygen.git", rev = "896f6bee7480cec3863c57c68fbae5f21de2861e", version = "0.1.0", default-features = false, features = ["reader"] }
 
 [features]
 # Local-dev only: skip the attestation/STS/SA/Secret-Manager chain and boot
