@@ -1174,9 +1174,10 @@ mod tests {
         assert_from_env_errors_with("COFHE_ENV");
     }
 
-    /// COFHE_ENV=staging resolves the compiled-in source (5 partners + bucket/object)
+    /// COFHE_ENV=staging resolves the compiled-in source (partners + bucket/object)
     /// AND the baked security policy (permit + commitment gates ON). Both RPC
-    /// inputs are stubbed so boot succeeds.
+    /// inputs are stubbed so boot succeeds. The partner set and share version
+    /// change with each staging reshare, so they come from the baked env.
     #[cfg(not(feature = "mock"))]
     #[test]
     fn config_env_staging_resolves_baked_source_and_policy() {
@@ -1187,12 +1188,16 @@ mod tests {
         std::env::set_var("COMMITMENT_REGISTRY_RPC_URL", "http://x");
         let cfg = Config::from_env().expect("from_env");
         assert_eq!(cfg.env, "staging");
-        assert_eq!(cfg.env_cfg.partners.len(), 5);
+        let baked = cofhe_keys::reader::lookup("staging").expect("staging is baked");
+        assert!(std::ptr::eq(cfg.env_cfg, baked));
         assert_eq!(cfg.env_cfg.partners[0].project_id, "cofhe-tee-partner-1");
         assert_eq!(cfg.env_cfg.public_bucket, "localcofhenix");
         assert_eq!(
             cfg.env_cfg.manifest_object(),
-            "generator/keys/versionized/0/public-material.v9"
+            format!(
+                "generator/keys/versionized/0/public-material.v{}",
+                baked.share_version
+            )
         );
         assert_eq!(cfg.threshold, 2);
         // Baked staging policy: both gates on.
