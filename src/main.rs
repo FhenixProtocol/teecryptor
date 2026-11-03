@@ -567,15 +567,18 @@ async fn load_keys(cfg: &Config) -> Result<teecryptor::key_source::LoadedKeys> {
         })
         .collect();
 
+    // Every partner and the manifest are read at the env's one baked version, never latest.
+    let manifest = cfg.env_cfg.manifest_object();
+    let share_version = cfg.env_cfg.share_version;
     let ctx = ReaderContext {
         sm: &sm,
         gcs: &gcs,
         gcs_token: &gcs_token,
         public_bucket: cfg.env_cfg.public_bucket,
-        public_object: cfg.env_cfg.public_object,
+        public_object: &manifest,
     };
 
-    let share = read_fhe_priv(&ctx, &accesses, cfg.threshold)
+    let share = read_fhe_priv(&ctx, &accesses, cfg.threshold, &|_| share_version)
         .await
         .context("reconstruct fhe-priv across partners")?;
     // Fingerprint the reconstructed ClientKey bytes before `assemble` consumes
@@ -1188,8 +1191,8 @@ mod tests {
         assert_eq!(cfg.env_cfg.partners[0].project_id, "cofhe-tee-partner-1");
         assert_eq!(cfg.env_cfg.public_bucket, "localcofhenix");
         assert_eq!(
-            cfg.env_cfg.public_object,
-            "generator/keys/versionized/0/public-material"
+            cfg.env_cfg.manifest_object(),
+            "generator/keys/versionized/0/public-material.v9"
         );
         assert_eq!(cfg.threshold, 2);
         // Baked staging policy: both gates on.
@@ -1227,8 +1230,8 @@ mod tests {
         assert_eq!(src.partners[0].project_id, "fhenix-507307");
         assert_eq!(src.public_bucket, "fhenix-mainnet-keys");
         assert_eq!(
-            src.public_object,
-            "generator/keys/versionized/0/public-material"
+            src.manifest_object(),
+            "generator/keys/versionized/0/public-material.v1"
         );
         assert_eq!(src.shamir_threshold, 3); // must match the keygen var-file's split
 
