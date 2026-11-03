@@ -287,13 +287,16 @@ jobs:
             echo "partner's attested_readers (keygen repo):"
             echo "    ${IMAGE_REGISTRY}@${AMD64_DIGEST}"
             echo
-            echo "Then per env, from a gitops checkout — apply, then roll:"
+            echo "Then per env, from a gitops checkout. Every partner applies this release (tag ${TAG}) FIRST."
+            echo "Only then run the compute apply, which is the roll. Otherwise the new VM cannot read its shares and the roll stalls."
             echo "    terraform -chdir=compute apply -var-file=<gitops>/terraform/<env>/teecryptor/<env>.tfvars"
-            echo "    gcloud compute instance-groups managed rolling-action replace teecryptor-mig \\"
-            echo "      --zone=<zone> --project=<env-compute-project> --max-surge=1 --max-unavailable=0"
+            echo "    gcloud compute instance-groups managed wait-until --version-target-reached teecryptor-mig \\"
+            echo "      --zone=<zone> --project=<env-compute-project>"
+            echo "    gcloud compute instance-groups managed wait-until --stable teecryptor-mig \\"
+            echo "      --zone=<zone> --project=<env-compute-project>"
+            echo "To restart the same template, use rolling-action replace with --max-surge=1 --max-unavailable=0 (gcloud defaults can take the only VM offline)."
             echo
-            echo "The apply alone deploys nothing: update_policy is OPPORTUNISTIC, so it only re-points"
-            echo "the template. The replace is what recreates the VM, which is what re-attests it."
+            echo "The apply rolls the VM: update_policy is PROACTIVE. The new VM re-attests."
             if [[ "${ATTESTED}" == "true" ]]; then
               echo
               echo "## Hand these two values to each partner"
