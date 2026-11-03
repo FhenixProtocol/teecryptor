@@ -315,16 +315,15 @@ resource "google_compute_instance_group_manager" "teecryptor" {
 
   target_size = var.mig_target_size
 
-  # Updates are MANUAL by design. OPPORTUNISTIC means the MIG never rolls a
-  # running instance on its own: bumping image_digest and `terraform apply`
-  # only re-points the template — the live VM keeps the old image until an
-  # operator explicitly rolls it:
-  #   gcloud compute instance-groups managed rolling-action replace teecryptor-mig \
-  #     --zone=<zone> --max-surge=1 --max-unavailable=0
+  # PROACTIVE: an apply that changes the instance template rolls the VMs itself,
+  # one at a time (max_surge 1, max_unavailable 0), gated by auto-healing health.
+  # Wait for it with:
+  #   gcloud compute instance-groups managed wait-until --stable teecryptor-mig --zone=<zone>
+  # To restart the SAME template, use `rolling-action replace`.
   # REPLACE (not RESTART/REFRESH): a Confidential VM's boot image can't change
-  # in place, so the instance is recreated — which also forces fresh attestation.
+  # in place, so the instance is recreated, which also forces fresh attestation.
   update_policy {
-    type                  = "OPPORTUNISTIC"
+    type                  = "PROACTIVE"
     minimal_action        = "REPLACE"
     max_surge_fixed       = 1
     max_unavailable_fixed = 0
