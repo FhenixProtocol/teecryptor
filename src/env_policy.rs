@@ -472,7 +472,7 @@ mod tests {
     }
 
     #[test]
-    fn testnet_policy_is_commitment_warn_only() {
+    fn testnet_policy_is_commitment_enforcing() {
         let p = EnvPolicy::for_env("testnet").expect("testnet policy");
         assert!(p.require_permit);
         assert!(p.enable_commitment_verification);
@@ -485,10 +485,7 @@ mod tests {
             c.registry_address,
             "0x4ed29DD2bda5055ADaB10ff63f5556F6774e7D9F"
         );
-        // Rollout posture: the gate runs and logs, but never blocks a decrypt.
-        // Version 1 is still Active on that registry and holds most of the
-        // history, so pre-cutover handles miss under version 2.
-        assert!(c.warning_instead_of_enforcement);
+        assert!(!c.warning_instead_of_enforcement);
     }
 
     #[test]
