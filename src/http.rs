@@ -4194,4 +4194,303 @@ mod tests {
             );
         }
     }
+
+    // -------- @cofhe/sdk wire contract ---------------------------------------
+    //
+    // The SDK maps each v2 `error` code below to its own error code, so a
+    // renamed code or a changed status breaks every client.
+
+    const SDK_V2_ROUTES: [&str; 2] = ["/v2/decrypt", "/v2/sealoutput"];
+
+    fn acp_verifier_at(rpc_url: String, timeout: Duration) -> ChainsVerifierConfig {
+        let mut chains = std::collections::HashMap::new();
+        chains.insert(
+            TEST_CHAIN_ID,
+            crate::permit::ChainConfig::new(
+                rpc_url,
+                alloy::primitives::address!("00000000000000000000000000000000000000aa"),
+                timeout,
+            )
+            .expect("valid rpc_url"),
+        );
+        ChainsVerifierConfig { chains }
+    }
+
+    fn acp_gated_state(rpc_url: String, timeout: Duration) -> AppState {
+        AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None)
+            .with_acp_verifier(acp_verifier_at(rpc_url, timeout))
+    }
+
+    /// POST `body` to every route in `routes` on one server, collecting
+    /// `(route, status, body)` so a test compares all routes in one assertion.
+    async fn post_sdk_routes(
+        state: AppState,
+        routes: &[&'static str],
+        body: &serde_json::Value,
+    ) -> Vec<(&'static str, u16, serde_json::Value)> {
+        state.set_ready();
+        let base = spawn(state).await;
+        let client = reqwest::Client::new();
+        let mut out = Vec::with_capacity(routes.len());
+        for &route in routes {
+            let r = client
+                .post(format!("{base}{route}"))
+                .json(body)
+                .send()
+                .await
+                .unwrap();
+            out.push((route, r.status().as_u16(), r.json().await.unwrap()));
+        }
+        out
+    }
+
+    fn sdk_error(
+        routes: &[&'static str],
+        status: u16,
+        code: &str,
+    ) -> Vec<(&'static str, u16, serde_json::Value)> {
+        routes
+            .iter()
+            .map(|&route| (route, status, serde_json::json!({ "error": code })))
+            .collect()
+    }
+
+    async fn post_with_acl_revert(
+        revert_data: Vec<u8>,
+    ) -> Vec<(&'static str, u16, serde_json::Value)> {
+        let rpc = crate::test_support::spawn_json_rpc_revert(&revert_data).await;
+        post_sdk_routes(
+            acp_gated_state(rpc, Duration::from_secs(5)),
+            &SDK_V2_ROUTES,
+            &not_ready_seal_body(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn sdk_acp_the_acl_rejects_is_401_acp_denied() {
+        let (rpc, _) = crate::test_support::spawn_json_rpc_mock(CT_ABSENT_B32).await; // false
+        let got = post_sdk_routes(
+            acp_gated_state(rpc, Duration::from_secs(5)),
+            &SDK_V2_ROUTES,
+            &not_ready_seal_body(),
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 401, "acp_denied"));
+    }
+
+    #[tokio::test]
+    async fn sdk_revoked_acp_is_401_acp_denied() {
+        use alloy::sol_types::SolError;
+        let got =
+            post_with_acl_revert(crate::permit::ACL::PermissionInvalid_Disabled {}.abi_encode())
+                .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 401, "acp_denied"));
+    }
+
+    #[tokio::test]
+    async fn sdk_expired_acp_is_401_acp_expired() {
+        use alloy::sol_types::SolError;
+        let got =
+            post_with_acl_revert(crate::permit::ACL::PermissionInvalid_Expired {}.abi_encode())
+                .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 401, "acp_expired"));
+    }
+
+    #[tokio::test]
+    async fn sdk_acp_with_a_bad_issuer_signature_is_401_acp_invalid() {
+        use alloy::sol_types::SolError;
+        let got = post_with_acl_revert(
+            crate::permit::ACL::PermissionInvalid_IssuerSignature {}.abi_encode(),
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 401, "acp_invalid"));
+    }
+
+    #[tokio::test]
+    async fn sdk_acp_with_a_bad_recipient_signature_is_401_acp_invalid() {
+        use alloy::sol_types::SolError;
+        let got = post_with_acl_revert(
+            crate::permit::ACL::PermissionInvalid_RecipientSignature {}.abi_encode(),
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 401, "acp_invalid"));
+    }
+
+    #[tokio::test]
+    async fn sdk_decrypt_without_acp_of_a_private_handle_is_403_not_publicly_allowed() {
+        let (rpc, _) = crate::test_support::spawn_json_rpc_mock(CT_ABSENT_B32).await; // false
+        let got = post_sdk_routes(
+            acp_gated_state(rpc, Duration::from_secs(5)),
+            &["/v2/decrypt"],
+            &not_ready_decrypt_body(),
+        )
+        .await;
+        assert_eq!(
+            got,
+            sdk_error(&["/v2/decrypt"], 403, "not_publicly_allowed")
+        );
+    }
+
+    #[tokio::test]
+    async fn sdk_unparseable_acp_is_400_acp_malformed() {
+        let mut body = not_ready_seal_body();
+        body["acp"]["issuer"] = "not-an-address".into();
+        let got = post_sdk_routes(
+            AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None)
+                .with_acp_verifier(acp_verifier_unreachable()),
+            &SDK_V2_ROUTES,
+            &body,
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 400, "acp_malformed"));
+    }
+
+    #[tokio::test]
+    async fn sdk_sealoutput_with_a_short_sealing_key_is_400_acp_malformed() {
+        let server = mock_get_ct(u32_ct_body(1)).await;
+        let mut body = not_ready_seal_body();
+        body["acp"]["sealingKey"] = "0xdeadbeef".into();
+        let got = post_sdk_routes(
+            AppState::new(keystore(), ct_source(&server.uri()), None),
+            &["/v2/sealoutput"],
+            &body,
+        )
+        .await;
+        assert_eq!(got, sdk_error(&["/v2/sealoutput"], 400, "acp_malformed"));
+    }
+
+    #[tokio::test]
+    async fn sdk_unserved_chain_is_400_unknown_chain() {
+        let mut body = not_ready_seal_body();
+        body["host_chain_id"] = 999_999u64.into();
+        let got = post_sdk_routes(
+            AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None)
+                .with_acp_verifier(acp_verifier_unreachable()),
+            &SDK_V2_ROUTES,
+            &body,
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 400, "unknown_chain"));
+    }
+
+    #[tokio::test]
+    async fn sdk_sealoutput_without_acp_is_400_acp_required() {
+        let got = post_sdk_routes(
+            AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None),
+            &["/v2/sealoutput"],
+            &not_ready_decrypt_body(),
+        )
+        .await;
+        assert_eq!(got, sdk_error(&["/v2/sealoutput"], 400, "acp_required"));
+    }
+
+    #[tokio::test]
+    async fn sdk_malformed_handle_is_400_bad_request() {
+        let mut body = not_ready_seal_body();
+        body["ct_tempkey"] = "zz".into();
+        let got = post_sdk_routes(
+            AppState::new(keystore(), ct_source("http://127.0.0.1:1"), None),
+            &SDK_V2_ROUTES,
+            &body,
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 400, "bad_request"));
+    }
+
+    #[tokio::test]
+    async fn sdk_hung_acp_verifier_is_504_acp_verifier_timeout() {
+        let rpc = crate::test_support::spawn_hanging_http_mock().await;
+        let got = post_sdk_routes(
+            acp_gated_state(rpc, Duration::from_millis(100)),
+            &SDK_V2_ROUTES,
+            &not_ready_seal_body(),
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 504, "acp_verifier_timeout"));
+    }
+
+    #[tokio::test]
+    async fn sdk_undecodable_acp_verifier_answer_is_502_acp_verifier_error() {
+        let (rpc, _) = crate::test_support::spawn_json_rpc_mock("0x").await;
+        let got = post_sdk_routes(
+            acp_gated_state(rpc, Duration::from_secs(5)),
+            &SDK_V2_ROUTES,
+            &not_ready_seal_body(),
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 502, "acp_verifier_error"));
+    }
+
+    /// Spawn a ct-server mock that answers `/GetStoredCt` with `response`, then
+    /// POST the ACP-carrying body to both v2 routes with ACL enforcement off.
+    async fn post_with_ct_server(
+        response: ResponseTemplate,
+        timeout: Duration,
+    ) -> Vec<(&'static str, u16, serde_json::Value)> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/GetStoredCt"))
+            .respond_with(response)
+            .mount(&server)
+            .await;
+        let state = AppState::new(
+            keystore(),
+            CtSource::new(&server.uri(), timeout).unwrap(),
+            None,
+        );
+        post_sdk_routes(state, &SDK_V2_ROUTES, &not_ready_seal_body()).await
+    }
+
+    #[tokio::test]
+    async fn sdk_missing_ciphertext_is_404_ct_not_found() {
+        let got = post_with_ct_server(ResponseTemplate::new(404), Duration::from_secs(5)).await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 404, "ct_not_found"));
+    }
+
+    #[tokio::test]
+    async fn sdk_slow_ct_server_is_504_ct_source_timeout() {
+        let got = post_with_ct_server(
+            ResponseTemplate::new(200).set_delay(Duration::from_millis(300)),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 504, "ct_source_timeout"));
+    }
+
+    #[tokio::test]
+    async fn sdk_failing_ct_server_is_502_ct_source_error() {
+        let got = post_with_ct_server(ResponseTemplate::new(500), Duration::from_secs(5)).await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 502, "ct_source_error"));
+    }
+
+    #[tokio::test]
+    async fn sdk_ciphertext_in_another_zone_is_422_unsupported_security_zone() {
+        let mut ct = u32_ct_body(1);
+        ct["security_zone"] = 1.into();
+        let got = post_with_ct_server(
+            ResponseTemplate::new(200).set_body_json(ct),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            got,
+            sdk_error(&SDK_V2_ROUTES, 422, "unsupported_security_zone")
+        );
+    }
+
+    #[tokio::test]
+    async fn sdk_ciphertext_of_an_unknown_type_is_422_unsupported_type() {
+        // uint_type=1 is a gap in cofhe's enum (between Bool=0 and U8=2).
+        let ct = serde_json::json!({
+            "data": "0xdeadbeef",
+            "uint_type": 1, "security_zone": 0, "compact": false, "gzipped": true
+        });
+        let got = post_with_ct_server(
+            ResponseTemplate::new(200).set_body_json(ct),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(got, sdk_error(&SDK_V2_ROUTES, 422, "unsupported_type"));
+    }
 }

@@ -50,7 +50,28 @@ pub(crate) async fn spawn_json_rpc_mock(
 /// e.g. a registry wiped and redeployed with a different commitment.
 pub(crate) async fn spawn_json_rpc_mock_seq(results: Vec<String>) -> (String, Arc<AtomicUsize>) {
     assert!(!results.is_empty(), "need at least one canned result");
-    let results = Arc::new(results);
+    let members = results
+        .into_iter()
+        .map(|result_hex| format!("\"result\":\"{result_hex}\""))
+        .collect();
+    spawn_json_rpc_members(members).await
+}
+
+/// A JSON-RPC mock that answers every `eth_call` with an execution revert
+/// carrying `revert_data` (ABI-encoded custom error), the way a node reports a
+/// contract that reverted.
+pub(crate) async fn spawn_json_rpc_revert(revert_data: &[u8]) -> String {
+    let member = format!(
+        "\"error\":{{\"code\":3,\"message\":\"execution reverted\",\"data\":\"0x{}\"}}",
+        hex::encode(revert_data)
+    );
+    spawn_json_rpc_members(vec![member]).await.0
+}
+
+/// Serve `members[n]` (the JSON member after `id`) to the n-th request,
+/// repeating the last entry past the end.
+async fn spawn_json_rpc_members(members: Vec<String>) -> (String, Arc<AtomicUsize>) {
+    let results = Arc::new(members);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let url = format!("http://{}", listener.local_addr().unwrap());
     let reqs = Arc::new(AtomicUsize::new(0));
@@ -73,7 +94,7 @@ pub(crate) async fn spawn_json_rpc_mock_seq(results: Vec<String>) -> (String, Ar
                     // `fetch_add` yields the pre-increment count = this
                     // request's index into the canned sequence.
                     let idx = reqs_conn.fetch_add(1, Ordering::SeqCst);
-                    let result_hex = &results[idx.min(results.len() - 1)];
+                    let member = &results[idx.min(results.len() - 1)];
                     let text = String::from_utf8_lossy(&buf[..n]);
                     let id = text
                         .split("\"id\":")
@@ -83,8 +104,7 @@ pub(crate) async fn spawn_json_rpc_mock_seq(results: Vec<String>) -> (String, Ar
                         .filter(|s| !s.is_empty())
                         .unwrap_or("1")
                         .to_string();
-                    let json =
-                        format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":\"{result_hex}\"}}");
+                    let json = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},{member}}}");
                     let resp = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
                          Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
