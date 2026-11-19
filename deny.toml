@@ -27,6 +27,9 @@ ignore = [
     # use it. 0.6.1 is lock-only (vsss-rs `bigint` feature is off). The fix needs
     # k256 0.14, so revisit on an alloy bump.
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5.5 forced by elliptic-curve 0.13 (k256/alloy); fix needs k256 0.14" },
+    # chrono unmaintained, no CVE. Used only for two RFC 3339 response timestamps;
+    # revisit by swapping to jiff (must keep the exact timestamp format the SDK sees).
+    { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained, no CVE; only formats two RFC 3339 timestamps" },
 ]
 
 [licenses]

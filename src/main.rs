@@ -1518,12 +1518,11 @@ mod tests {
         assert_from_env_errors_with("COMMITMENT_TIMEOUT_MS");
     }
 
-    /// COFHE_ENV=testnet bakes the commitment gate ON in warn-only mode: the
-    /// verifier is installed (so the gate runs and logs) and the baked policy says
-    /// log-and-allow rather than block.
+    /// COFHE_ENV=testnet bakes the commitment gate ON and enforcing: the verifier
+    /// is installed and the baked policy blocks a decrypt with no commitment.
     #[cfg(not(feature = "mock"))]
     #[test]
-    fn config_testnet_bakes_commitment_warn_only() {
+    fn config_testnet_bakes_commitment_enforcing() {
         let _g = EnvGuard::new(KEYS);
         set_valid_testnet_baseline();
         let cfg = Config::from_env().expect("from_env");
@@ -1532,7 +1531,7 @@ mod tests {
         assert!(cfg.require_permit);
         let p = env_policy::EnvPolicy::for_env("testnet").expect("testnet policy");
         assert!(
-            p.commitment
+            !p.commitment
                 .expect("testnet has a [commitment] block")
                 .warning_instead_of_enforcement
         );

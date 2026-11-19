@@ -22,17 +22,15 @@ metrics_push = true
 #
 # The version below is v2 in canonical form (0x + 64 hex digits), matching what
 # the engine commits under and the key the registry stores. Version 1 is
-# still Active on that registry and holds the bulk of the history, so handles
-# committed before the v2 cutover resolve only under v1 and will MISS under v2.
-# That is why this starts in warn-only:
+# still Active on that registry, so handles committed before the v2 cutover
+# resolve only under v1 and MISS under v2.
 #
-# warning_instead_of_enforcement = run the gate and log every failure with
-# mode=warn_only, but ALLOW the decrypt. Flip to false (rebuild + re-pin) once
-# the warn logs are clean, i.e. once v1-only handles have aged out.
+# ENFORCING (warning_instead_of_enforcement = false): a decrypt whose handle has
+# no v2 commitment is refused, so pre-cutover v1-only handles no longer decrypt.
 [commitment]
 version                        = "0x0000000000000000000000000000000000000000000000000000000000000002"
 registry_address               = "0x4ed29DD2bda5055ADaB10ff63f5556F6774e7D9F"
-warning_instead_of_enforcement = true
+warning_instead_of_enforcement = false
 
 # ACL gate: the TaskManager is resolved at boot through the attested address book
 # (`COFHE_ADDRESS_BOOK` in env_policy.rs) as `getTm(id)`, per served chain. The id is
